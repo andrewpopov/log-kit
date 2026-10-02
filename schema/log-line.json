@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "log-kit log line (schema v1)",
+  "description": "One JSON object per line. Free-form fields are allowed; the reserved envelope keys v, time, level, app, proc and msg are owned by the logger.",
+  "type": "object",
+  "required": ["v", "time", "level", "app", "msg"],
+  "properties": {
+    "v": { "const": 1 },
+    "time": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "level": { "enum": ["trace", "debug", "info", "warn", "error", "fatal"] },
+    "app": { "type": "string", "minLength": 1 },
+    "proc": { "type": "string", "minLength": 1 },
+    "msg": { "type": "string" },
+    "req_id": { "type": "string", "minLength": 1 },
+    "err": {
+      "type": "object",
+      "required": ["type", "message"],
+      "properties": {
+        "type": { "type": "string" },
+        "message": { "type": "string" },
+        "stack": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "http": { "type": "object", "additionalProperties": true },
+    "ctx": {
+      "description": "Where caller fields that collided with a reserved envelope key are relocated (as an object)."
+    }
+  },
+  "additionalProperties": true
+}
