@@ -18,6 +18,8 @@ export interface CreateLoggerOptions {
 export interface LogMethod {
     (msg: string): void;
     (fields: LogFields, msg: string): void;
+    /** A bare Error is logged as `err`; `msg` defaults to the error's (bounded) message. */
+    (err: Error, msg?: string): void;
 }
 export interface Logger {
     readonly trace: LogMethod;

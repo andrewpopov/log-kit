@@ -2,8 +2,17 @@
  * The single choke point every caller-supplied value passes through before it
  * reaches output: merge objects, child bindings and messages.
  *
- * TODO(PKG-203 S2): replace with redaction. Identity until then.
+ * TODO(PKG-203 S3): replace with redaction. Identity until then.
  */
 export function sanitize<T>(value: T): T {
+  return value;
+}
+
+/**
+ * Redaction for one string: error messages and stacks pass through here.
+ *
+ * TODO(PKG-203 S3): replace with redaction. Identity until then.
+ */
+export function sanitizeString(value: string): string {
   return value;
 }

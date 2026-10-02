@@ -52,7 +52,7 @@ describe('envelope', () => {
     expect(out.lines[0]).toMatchObject({ app: 'demo', job: 'sync', count: 3, msg: 'done' });
   });
 
-  it('serializes err through the minimal {type, message, stack} shape', () => {
+  it('serializes err through the allowlisted {type, message, stack} shape', () => {
     const out = captureStream();
     createLoggerWithStream({ app: 'demo' }, out).error({ err: new TypeError('boom') }, 'failed');
     expect(out.lines[0].err).toEqual({
@@ -60,6 +60,21 @@ describe('envelope', () => {
       message: 'boom',
       stack: expect.stringContaining('boom'),
     });
+  });
+});
+
+describe('error call forms', () => {
+  it('types and runs all three: log.error(err), log.error(err, msg) and log.error({ err }, msg)', () => {
+    const out = captureStream();
+    const log = createLoggerWithStream({ app: 'demo' }, out);
+    log.error(new Error('bare'));
+    log.error(new Error('with msg'), 'explicit');
+    log.error({ err: new Error('keyed') }, 'in fields');
+    expect(out.lines.map((line) => [line.msg, (line.err as { message: string }).message])).toEqual([
+      ['bare', 'bare'],
+      ['explicit', 'with msg'],
+      ['in fields', 'keyed'],
+    ]);
   });
 });
 
