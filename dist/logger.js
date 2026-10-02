@@ -7,6 +7,7 @@ exports.createLoggerWithStream = createLoggerWithStream;
 exports.createLogger = createLogger;
 const pino_1 = __importDefault(require("pino"));
 const errors_1 = require("./errors");
+const redact_policy_1 = require("./redact-policy");
 const reserved_1 = require("./reserved");
 const sanitize_1 = require("./sanitize");
 const serialize_error_1 = require("./serialize-error");
@@ -40,15 +41,15 @@ function openDestination(destination) {
         return pino_1.default.destination({ fd: 1, sync: true });
     return pino_1.default.destination({ dest: requireName('destination.file', destination.file), sync: true });
 }
-function wrap(base) {
+function wrap(base, policy) {
     const method = (level) => (first, msg) => {
         if (typeof first === 'string') {
-            base[level]((0, sanitize_1.sanitize)(first));
+            base[level]((0, sanitize_1.sanitize)(first, policy));
             return;
         }
         // Pino would special-case a bare Error and stringify its enumerable properties; normalise it ourselves.
         const fields = (0, serialize_error_1.isError)(first) ? { err: first } : first;
-        base[level]((0, reserved_1.relocateReserved)((0, sanitize_1.sanitize)((0, serialize_error_1.normaliseFields)(fields))), (0, sanitize_1.sanitize)(msg));
+        base[level]((0, reserved_1.relocateReserved)((0, sanitize_1.sanitize)((0, serialize_error_1.normaliseFields)(fields), policy)), (0, sanitize_1.sanitize)(msg, policy));
     };
     return {
         trace: method('trace'),
@@ -57,7 +58,7 @@ function wrap(base) {
         warn: method('warn'),
         error: method('error'),
         fatal: method('fatal'),
-        child: (bindings) => wrap(base.child((0, reserved_1.relocateReserved)((0, sanitize_1.sanitize)((0, serialize_error_1.normaliseFields)(bindings))))),
+        child: (bindings) => wrap(base.child((0, reserved_1.relocateReserved)((0, sanitize_1.sanitize)((0, serialize_error_1.normaliseFields)(bindings), policy))), policy),
     };
 }
 function resolveConfig(options) {
@@ -65,9 +66,10 @@ function resolveConfig(options) {
         app: requireName('app', options.app),
         proc: options.proc === undefined ? undefined : requireName('proc', options.proc),
         level: resolveLevel(options.level),
+        policy: (0, redact_policy_1.resolveRedactPolicy)(options.redact),
     };
 }
-function build({ app, proc, level }, stream) {
+function build({ app, proc, level, policy }, stream) {
     const base = (0, pino_1.default)({
         level,
         base: proc === undefined ? { v: SCHEMA_VERSION, app } : { v: SCHEMA_VERSION, app, proc },
@@ -77,7 +79,7 @@ function build({ app, proc, level }, stream) {
         // would re-serialise our output (keeping aggregateErrors, dropping the allowlist), so it is replaced, not removed.
         serializers: { err: (alreadySerialised) => alreadySerialised },
     }, stream);
-    return wrap(base);
+    return wrap(base, policy);
 }
 /** Internal: lets tests capture output through an injected stream instead of patching process.stdout. */
 function createLoggerWithStream(options, stream) {

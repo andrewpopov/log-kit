@@ -1,15 +1,16 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TRUNCATION_MARKER = void 0;
+exports.isWalkable = exports.isObject = exports.unreadable = exports.MAX_FIELD_DEPTH = exports.TRUNCATED = exports.CIRCULAR = exports.UNREADABLE = exports.TRUNCATION_MARKER = void 0;
+exports.read = read;
 exports.isError = isError;
 exports.serializeError = serializeError;
 exports.normaliseFields = normaliseFields;
 const node_util_1 = require("node:util");
-const sanitize_1 = require("./sanitize");
+const redact_string_1 = require("./redact-string");
 exports.TRUNCATION_MARKER = '…[truncated]';
-const UNREADABLE = '[unreadable]';
-const CIRCULAR = '[circular]';
-const TRUNCATED = '[truncated]';
+exports.UNREADABLE = '[unreadable]';
+exports.CIRCULAR = '[circular]';
+exports.TRUNCATED = '[truncated]';
 const MAX_TYPE = 100;
 const MAX_CODE = 100;
 const MAX_MESSAGE = 2000;
@@ -19,8 +20,8 @@ const MAX_STACK_FRAMES = 50;
 const MAX_ERROR_DEPTH = 5;
 const MAX_AGGREGATE_ERRORS = 10;
 /** How deep `normaliseFields` looks for an Error inside a caller's fields. */
-const MAX_FIELD_DEPTH = 8;
-const unreadable = Symbol('unreadable');
+exports.MAX_FIELD_DEPTH = 8;
+exports.unreadable = Symbol('unreadable');
 const GENERIC_TYPE_NAMES = new Set(['', 'Object', 'Error']);
 /** Property read that survives a throwing getter or Proxy trap. */
 function read(source, key) {
@@ -28,10 +29,11 @@ function read(source, key) {
         return source[key];
     }
     catch {
-        return unreadable;
+        return exports.unreadable;
     }
 }
 const isObject = (value) => typeof value === 'object' && value !== null;
+exports.isObject = isObject;
 function isError(value) {
     try {
         return value instanceof Error || node_util_1.types.isNativeError(value);
@@ -44,12 +46,12 @@ function truncate(text, max) {
     return text.length <= max ? text : text.slice(0, max - exports.TRUNCATION_MARKER.length) + exports.TRUNCATION_MARKER;
 }
 /** Message-like text: redacted first so a secret cut in half by the bound cannot survive as a prefix. */
-const boundedText = (text, max) => truncate((0, sanitize_1.sanitizeString)(text), max);
+const boundedText = (text, max) => truncate((0, redact_string_1.sanitizeString)(text), max);
 function boundStack(stack) {
     const kept = [];
     let frames = 0;
     let cutFrames = false;
-    for (const line of (0, sanitize_1.sanitizeString)(stack).split('\n')) {
+    for (const line of (0, redact_string_1.sanitizeString)(stack).split('\n')) {
         if (/^\s+at /.test(line) && ++frames > MAX_STACK_FRAMES) {
             cutFrames = true;
             break;
@@ -65,27 +67,27 @@ function typeName(source) {
     const ctor = read(source, 'constructor');
     const ctorName = typeof ctor === 'function' ? read(ctor, 'name') : undefined;
     for (const candidate of [ctorName, read(source, 'name'), read(source, 'type')]) {
-        if (candidate === unreadable)
-            return UNREADABLE;
+        if (candidate === exports.unreadable)
+            return exports.UNREADABLE;
         // A bare Error or plain object says nothing, so a more specific `name` (an AbortError) wins over it.
         if (typeof candidate === 'string' && !GENERIC_TYPE_NAMES.has(candidate))
-            return truncate(candidate, MAX_TYPE);
+            return boundedText(candidate, MAX_TYPE);
     }
     return 'Error';
 }
 /** A real Error, or an object carrying a string `message`: axios's `toJSON()` output, an error that went through JSON. */
 function isErrorLike(value) {
-    return isError(value) || (isObject(value) && typeof read(value, 'message') === 'string');
+    return isError(value) || ((0, exports.isObject)(value) && typeof read(value, 'message') === 'string');
 }
 function describeNonError(value) {
-    if (!isObject(value) && typeof value !== 'function')
+    if (!(0, exports.isObject)(value) && typeof value !== 'function')
         return String(value);
     // Never String(value): that would run a caller's toString (or print a function's source).
     try {
         return Object.prototype.toString.call(value);
     }
     catch {
-        return UNREADABLE;
+        return exports.UNREADABLE;
     }
 }
 function fromNonError(value) {
@@ -93,8 +95,8 @@ function fromNonError(value) {
 }
 function readText(source, key, bound) {
     const value = read(source, key);
-    if (value === unreadable)
-        return UNREADABLE;
+    if (value === exports.unreadable)
+        return exports.UNREADABLE;
     return typeof value === 'string' ? bound(value) : undefined;
 }
 function readStatus(source) {
@@ -107,25 +109,25 @@ function readStatus(source) {
 }
 function readCode(source) {
     const value = read(source, 'code');
-    if (value === unreadable)
-        return UNREADABLE;
+    if (value === exports.unreadable)
+        return exports.UNREADABLE;
     if (typeof value === 'string')
-        return truncate(value, MAX_CODE);
+        return boundedText(value, MAX_CODE);
     return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 function node(value, depth, path) {
-    if (value === unreadable)
-        return UNREADABLE;
-    if (isObject(value) && path.has(value))
-        return CIRCULAR;
+    if (value === exports.unreadable)
+        return exports.UNREADABLE;
+    if ((0, exports.isObject)(value) && path.has(value))
+        return exports.CIRCULAR;
     if (depth > MAX_ERROR_DEPTH)
-        return TRUNCATED;
+        return exports.TRUNCATED;
     return fromValue(value, depth, path);
 }
 function readErrors(source, depth, path) {
     const list = read(source, 'errors');
-    if (list === unreadable)
-        return { errors: [UNREADABLE] };
+    if (list === exports.unreadable)
+        return { errors: [exports.UNREADABLE] };
     if (!Array.isArray(list))
         return {};
     const length = read(list, 'length');
@@ -170,6 +172,7 @@ function fromValue(value, depth, path) {
 function serializeError(value) {
     return fromValue(value, 1, new Set());
 }
+/** An array, or an object with no prototype beyond `Object`: data, as opposed to a class instance. */
 const isWalkable = (value) => {
     if (Array.isArray(value))
         return true;
@@ -181,15 +184,16 @@ const isWalkable = (value) => {
         return false;
     }
 };
+exports.isWalkable = isWalkable;
 function walk(value, depth, path) {
     if (isError(value))
         return serializeError(value);
-    if (!isObject(value) || !isWalkable(value))
+    if (!(0, exports.isObject)(value) || !(0, exports.isWalkable)(value))
         return value;
     if (path.has(value))
-        return CIRCULAR;
-    if (depth > MAX_FIELD_DEPTH)
-        return TRUNCATED;
+        return exports.CIRCULAR;
+    if (depth > exports.MAX_FIELD_DEPTH)
+        return exports.TRUNCATED;
     path.add(value);
     try {
         if (Array.isArray(value)) {
@@ -202,7 +206,7 @@ function walk(value, depth, path) {
         return Object.fromEntries(Object.keys(value).map((key) => [key, readField(value, key, depth, path)]));
     }
     catch {
-        return UNREADABLE;
+        return exports.UNREADABLE;
     }
     finally {
         path.delete(value);
@@ -210,7 +214,7 @@ function walk(value, depth, path) {
 }
 function readField(source, key, depth, path) {
     const value = read(source, key);
-    return value === unreadable ? UNREADABLE : walk(value, depth + 1, path);
+    return value === exports.unreadable ? exports.UNREADABLE : walk(value, depth + 1, path);
 }
 /**
  * Makes every Error inside caller fields safe before pino sees it: pino's
@@ -226,7 +230,7 @@ function normaliseFields(fields) {
         const value = read(fields, key);
         if (value === undefined)
             continue;
-        entries.push([key, value === unreadable ? UNREADABLE : key === 'err' ? serializeError(value) : walk(value, 1, path)]);
+        entries.push([key, value === exports.unreadable ? exports.UNREADABLE : key === 'err' ? serializeError(value) : walk(value, 1, path)]);
     }
     // fromEntries defines own properties, so a hostile `__proto__` key stays data instead of reassigning the prototype.
     return Object.fromEntries(entries);

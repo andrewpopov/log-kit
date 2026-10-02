@@ -1,11 +1,11 @@
 import { types } from 'node:util';
-import { sanitizeString } from './sanitize';
+import { sanitizeString } from './redact-string';
 import type { LogFields } from './types';
 
 export const TRUNCATION_MARKER = '…[truncated]';
-const UNREADABLE = '[unreadable]';
-const CIRCULAR = '[circular]';
-const TRUNCATED = '[truncated]';
+export const UNREADABLE = '[unreadable]';
+export const CIRCULAR = '[circular]';
+export const TRUNCATED = '[truncated]';
 
 const MAX_TYPE = 100;
 const MAX_CODE = 100;
@@ -16,7 +16,7 @@ const MAX_STACK_FRAMES = 50;
 const MAX_ERROR_DEPTH = 5;
 const MAX_AGGREGATE_ERRORS = 10;
 /** How deep `normaliseFields` looks for an Error inside a caller's fields. */
-const MAX_FIELD_DEPTH = 8;
+export const MAX_FIELD_DEPTH = 8;
 
 /** The only keys an error ever emits. Everything else on the source is ignored, whatever its name. */
 export interface SerializedError {
@@ -33,11 +33,11 @@ export interface SerializedError {
 /** A nested error, or a marker string: `[circular]`, `[truncated]` or `[unreadable]`. */
 export type SerializedErrorRef = SerializedError | string;
 
-const unreadable = Symbol('unreadable');
+export const unreadable = Symbol('unreadable');
 const GENERIC_TYPE_NAMES: ReadonlySet<string> = new Set(['', 'Object', 'Error']);
 
 /** Property read that survives a throwing getter or Proxy trap. */
-function read(source: object, key: string | number): unknown {
+export function read(source: object, key: string | number): unknown {
   try {
     return (source as Record<string | number, unknown>)[key];
   } catch {
@@ -45,7 +45,7 @@ function read(source: object, key: string | number): unknown {
   }
 }
 
-const isObject = (value: unknown): value is object => typeof value === 'object' && value !== null;
+export const isObject = (value: unknown): value is object => typeof value === 'object' && value !== null;
 
 export function isError(value: unknown): value is Error {
   try {
@@ -84,7 +84,7 @@ function typeName(source: object): string {
   for (const candidate of [ctorName, read(source, 'name'), read(source, 'type')]) {
     if (candidate === unreadable) return UNREADABLE;
     // A bare Error or plain object says nothing, so a more specific `name` (an AbortError) wins over it.
-    if (typeof candidate === 'string' && !GENERIC_TYPE_NAMES.has(candidate)) return truncate(candidate, MAX_TYPE);
+    if (typeof candidate === 'string' && !GENERIC_TYPE_NAMES.has(candidate)) return boundedText(candidate, MAX_TYPE);
   }
   return 'Error';
 }
@@ -125,7 +125,7 @@ function readStatus(source: object): number | undefined {
 function readCode(source: object): string | number | undefined {
   const value = read(source, 'code');
   if (value === unreadable) return UNREADABLE;
-  if (typeof value === 'string') return truncate(value, MAX_CODE);
+  if (typeof value === 'string') return boundedText(value, MAX_CODE);
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
@@ -181,7 +181,8 @@ export function serializeError(value: unknown): SerializedError {
   return fromValue(value, 1, new Set());
 }
 
-const isWalkable = (value: object): boolean => {
+/** An array, or an object with no prototype beyond `Object`: data, as opposed to a class instance. */
+export const isWalkable = (value: object): boolean => {
   if (Array.isArray(value)) return true;
   try {
     const proto: unknown = Object.getPrototypeOf(value);

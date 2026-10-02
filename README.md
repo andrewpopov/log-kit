@@ -2,7 +2,7 @@
 
 One fleet logger for Node services: a single JSON line schema, redaction on by default, HTTP request logging, stdout only. See PKG-203.
 
-This README covers the core logger and error normalisation. Redaction and the HTTP adapters land in later slices.
+This README covers the core logger, error normalisation and redaction. The HTTP adapters land in a later slice.
 
 ## Usage
 
@@ -14,12 +14,13 @@ log.info({ recipe_id: 42 }, 'recipe saved');
 log.child({ req_id: 'r-1' }).warn('slow upstream');
 ```
 
-`createLogger({ app, level?, proc?, destination? })`:
+`createLogger({ app, level?, proc?, destination?, redact? })`:
 
 - `app`: service name, required, emitted on every line.
 - `level`: `trace | debug | info | warn | error | fatal`. Defaults to `LOG_LEVEL` when set, otherwise `info`. An empty `LOG_LEVEL` counts as unset. Any other value throws `LogConfigError` with code `INVALID_LOG_LEVEL`.
 - `proc`: process role, optional, emitted on every line.
 - `destination`: omit for synchronous stdout. `{ file: '/path/app.log' }` is the opt-in `LOG_FILE` path for hosts without pm2 (synchronous, append). Those are the only two destinations; there are no worker transports.
+- `redact`: additions to the built-in redaction, see Redaction. It can only add rules.
 
 Each level method takes `(msg)`, `(fields, msg)` or `(err, msg?)`. `child(bindings)` returns a logger that adds `bindings` to every line.
 
@@ -63,6 +64,48 @@ A value under the `err` key that is not an Error (a string, a number, a plain ob
 | `errors`, `errors_truncated` | AggregateError entries (at most 10) and how many more were dropped. |
 
 Cut text ends in `…[truncated]` and stays within its limit. Where a value cannot be shown, the field holds a marker string instead: `[circular]` for a cause chain that points back at itself, `[truncated]` past the depth limit, `[unreadable]` for a getter that throws.
+
+## Redaction
+
+Every value a caller supplies (the message, merge objects, `child()` bindings, error text) is rebuilt through one sanitiser before pino sees it. Output is a fresh tree of plain data: a caller's `toJSON` and getters are never trusted, and anything the sanitiser does not recognise is walked as plain data, never passed through.
+
+**Keys.** A key is compared lower-cased, after percent-decoding (up to three layers) and with `-`, `_` and whitespace removed, so `Authorization`, `%41uthorization` and `X_Api_Key` all match. A match replaces the value, whatever it holds, with `[REDACTED]`.
+
+- Exact names: `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `api-key`, `apikey`, `x-auth-token`, `password`, `passwd`, `secret`, `client_secret`, `private_key`, `credentials`.
+- Substrings: `secret`, `password`, `passwd`, `apikey`, `signature`, `session`, `bearer`, `authorization`, `cookie`, `privatekey`, and `token` with one exception.
+- **The `token` rule.** Delete every `tokens` and `tokencount`/`tokencounts` from the normalised key; if `token` is still in it, the key is a credential. So `token`, `accessToken`, `refresh_token`, `x-auth-token`, `csrfToken` and `tokenValue` are redacted, while `tokens`, `inputTokens`, `outputTokens`, `cacheReadTokens`, `cache_creation_input_tokens`, `max_tokens` and `token_count` are usage counters and stay. A counter key keeps its value only when that value is a number, bigint, boolean or null; a string, array or object under it is `[REDACTED]`, because `tokens: ['abc']` is a secret list, not a counter. A plural credential key such as `accessTokens` is therefore treated as a counter: put it in `redact.keys`.
+- Object keys are redacted as strings too, so a secret used as a key name does not survive.
+
+**Strings.** Applied to the message, every string value, object keys, and error `message`, `stack`, `type` and `code`:
+
+- `Bearer <x>` and `Basic <x>` (a `Basic` credential needs a digit or base64 punctuation, so "Basic authentication failed" reads as written; "bearer token expired" likewise). A whole `Authorization`, `Proxy-Authorization`, `Cookie` or `Set-Cookie` line is redacted to its end.
+- `name=value` and `"name":"value"` pairs for `password`, `passwd`, `secret`, `token`, `api_key`, `private_key`, `signature`, `session` and `credential(s)`. `tokens=5` is left alone, but prose such as `token: expired` is redacted too, the cost of catching `token: abc`.
+- JWTs (`eyJ...` with three parts).
+- URL userinfo: `https://user:pass@host` becomes `https://[REDACTED]@host`.
+- URL query and fragment: the whole `?...` and `#...` after `scheme://host/path` is dropped and replaced by `?[REDACTED]`; the path stays. A scheme-less path such as `/cb?code=abc` loses its query the same way when it opens with `name=`.
+- Key prefixes: `sk-` (at least 8 characters after it), `sk-ant-`, `sk_live_`/`sk_test_`/`rk_live_`/`rk_test_`, `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`, `github_pat_`, `xoxb-`/`xoxp-`/`xoxa-`/`xoxr-`/`xoxs-`, `AKIA`/`ASIA` access key ids, `tskey-`, `ya29.` and `GOCSPX-`. A prefix inside a longer word (`task-ant-worker`) is not matched.
+
+Every pattern is linear-time; a test sanitises 1 MB of each adversarial shape in under 100 ms. Redaction is idempotent.
+
+**Structure.** The walk is bounded: depth 8, 200 keys per object, 100 items per array, Map or Set. Past a bound the value is `[truncated]`; an object that lost keys gains one `"[truncated]": <dropped count>` key. A cycle is `[circular]`, a getter that throws is `[unreadable]`, a Buffer, typed array or ArrayBuffer is `[binary N bytes]`. A Map is an array of `[key, value]` pairs (a string key applies the same key rules) and a Set is an array. Dates become ISO strings, a `URL` its sanitised `href`. Functions and symbols are dropped. A class instance is walked as its own enumerable properties. An error pre-serialised under another key, such as `{ error: axiosErr.toJSON() }`, is plain data, so `config.headers.Authorization` is redacted by key and `config.data` omitted as a body.
+
+**Interpolation.** Not supported. The level methods take `(msg)`, `(fields, msg)` or `(err, msg?)`, and an extra argument is a type error. If a JS caller passes one anyway it is dropped, never formatted, so `log.info('login for %s', secret)` logs `login for %s` and a `%s` in `msg` stays literal. The final `msg`, including one pino derives from an error, is sanitised.
+
+**Bodies.** Never logged by default: the value under `body`, `payload`, `data` or `rawBody` (matched like any key, so `Body` and `raw_body` count) is `[omitted]`, wherever it sits. To log part of one, list dotted paths in `createLogger({ redact: { allowPaths: [...] } })`:
+
+```ts
+createLogger({ app: 'orders', redact: { allowPaths: ['data.order.id'] } });
+log.info({ data: { order: { id: 5, note: 'x' }, other: 1 } }, 'saved');
+// "data":{"order":{"id":5,"note":"[omitted]"},"other":"[omitted]"}
+```
+
+- A path is the chain of object keys from the top of the logged fields (or of the `child()` bindings) down to the value, joined with `.`. Arrays add no segment: `data.items.id` allows `id` in every element of `data.items`.
+- A listed path is logged in full, still redacted by the key and string rules. Inside a body, a value that is not listed, and is not on the way to a listed one, is `[omitted]`; a bare array item, and a class instance, Map or Set on the way, are `[omitted]` too.
+- An allowed path never exposes a credential key: key rules run first. A key containing a `.` cannot be told from nesting.
+
+**Extending.** `redact.keys` adds names. They get the same normalisation as the built-ins and match the whole key, not a substring (`keys: ['ssn']` hides `SSN` and `s_sn`, not `ssnLast4`). Nothing removes a built-in rule. Invalid options throw `LogConfigError` (`INVALID_ARGUMENT`).
+
+**Not here.** Left to the app: email addresses and other personal data, long opaque tokens with no known prefix, `1//` Google refresh tokens, and suppressing a whole call by its content (such as a login frame). Free text is pattern-based: pass credentials as fields under a credential key, not inside a sentence.
 
 ## Reserved envelope keys
 
