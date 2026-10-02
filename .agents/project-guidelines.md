@@ -24,10 +24,12 @@ in `packages-meta`; this package's source and packed exports are authoritative.
   overwriting the envelope (`src/reserved.ts`).
 - **Synchronous stdout, no worker transports.** `pino.destination({ fd: 1, sync: true })`.
   `{ file }` is the only other destination (the opt-in `LOG_FILE` path).
-- **Two seams for later slices, one function each:** `sanitize` (`src/sanitize.ts`,
-  identity until PKG-203 S2 redaction) and `serializeError` (`src/serialize-error.ts`,
-  minimal until S3). Every caller value reaches output through them; do not add a
-  second path around them.
+- **Two seams, one function each:** `sanitize` / `sanitizeString` (`src/sanitize.ts`,
+  identity until PKG-203 S3 redaction) and `serializeError` (`src/serialize-error.ts`,
+  the bounded allowlist error normaliser). Every caller value reaches output through
+  them; do not add a second path around them. Pino's default `err` serializer is
+  replaced with an identity on purpose: `normaliseFields` has already produced the
+  allowlisted `err`, and pino's own would re-serialise it.
 - **Typed config errors** (`LogConfigError.code`), like `MetricsConfigError`.
 
 ## Rules

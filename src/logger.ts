@@ -2,7 +2,7 @@ import pino from 'pino';
 import { LogConfigError } from './errors';
 import { relocateReserved } from './reserved';
 import { sanitize } from './sanitize';
-import { serializeError } from './serialize-error';
+import { isError, normaliseFields } from './serialize-error';
 import { LOG_LEVELS } from './types';
 import type { CreateLoggerOptions, LogDestination, LogFields, Logger, LogLevel, LogMethod } from './types';
 
@@ -45,12 +45,14 @@ function openDestination(destination: LogDestination | undefined): pino.Destinat
 function wrap(base: pino.Logger): Logger {
   const method =
     (level: LogLevel): LogMethod =>
-    (first: string | LogFields, msg?: string) => {
+    (first: string | Error | LogFields, msg?: string) => {
       if (typeof first === 'string') {
         base[level](sanitize(first));
         return;
       }
-      base[level](relocateReserved(sanitize(first)), sanitize(msg));
+      // Pino would special-case a bare Error and stringify its enumerable properties; normalise it ourselves.
+      const fields = isError(first) ? { err: first } : first;
+      base[level](relocateReserved(sanitize(normaliseFields(fields))), sanitize(msg));
     };
   return {
     trace: method('trace'),
@@ -59,7 +61,7 @@ function wrap(base: pino.Logger): Logger {
     warn: method('warn'),
     error: method('error'),
     fatal: method('fatal'),
-    child: (bindings) => wrap(base.child(relocateReserved(sanitize(bindings)))),
+    child: (bindings) => wrap(base.child(relocateReserved(sanitize(normaliseFields(bindings))))),
   };
 }
 
@@ -84,7 +86,9 @@ function build({ app, proc, level }: ResolvedConfig, stream: pino.DestinationStr
       base: proc === undefined ? { v: SCHEMA_VERSION, app } : { v: SCHEMA_VERSION, app, proc },
       timestamp: pino.stdTimeFunctions.isoTime,
       formatters: { level: (label) => ({ level: label }) },
-      serializers: { err: serializeError },
+      // `err` arrives already normalised by `serializeError`. Pino ships its own `err` serializer by default and
+      // would re-serialise our output (keeping aggregateErrors, dropping the allowlist), so it is replaced, not removed.
+      serializers: { err: (alreadySerialised: unknown) => alreadySerialised },
     },
     stream,
   );

@@ -46,7 +46,9 @@ function wrap(base) {
             base[level]((0, sanitize_1.sanitize)(first));
             return;
         }
-        base[level]((0, reserved_1.relocateReserved)((0, sanitize_1.sanitize)(first)), (0, sanitize_1.sanitize)(msg));
+        // Pino would special-case a bare Error and stringify its enumerable properties; normalise it ourselves.
+        const fields = (0, serialize_error_1.isError)(first) ? { err: first } : first;
+        base[level]((0, reserved_1.relocateReserved)((0, sanitize_1.sanitize)((0, serialize_error_1.normaliseFields)(fields))), (0, sanitize_1.sanitize)(msg));
     };
     return {
         trace: method('trace'),
@@ -55,7 +57,7 @@ function wrap(base) {
         warn: method('warn'),
         error: method('error'),
         fatal: method('fatal'),
-        child: (bindings) => wrap(base.child((0, reserved_1.relocateReserved)((0, sanitize_1.sanitize)(bindings)))),
+        child: (bindings) => wrap(base.child((0, reserved_1.relocateReserved)((0, sanitize_1.sanitize)((0, serialize_error_1.normaliseFields)(bindings))))),
     };
 }
 function resolveConfig(options) {
@@ -71,7 +73,9 @@ function build({ app, proc, level }, stream) {
         base: proc === undefined ? { v: SCHEMA_VERSION, app } : { v: SCHEMA_VERSION, app, proc },
         timestamp: pino_1.default.stdTimeFunctions.isoTime,
         formatters: { level: (label) => ({ level: label }) },
-        serializers: { err: serialize_error_1.serializeError },
+        // `err` arrives already normalised by `serializeError`. Pino ships its own `err` serializer by default and
+        // would re-serialise our output (keeping aggregateErrors, dropping the allowlist), so it is replaced, not removed.
+        serializers: { err: (alreadySerialised) => alreadySerialised },
     }, stream);
     return wrap(base);
 }

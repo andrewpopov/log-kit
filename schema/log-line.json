@@ -15,20 +15,37 @@
     "proc": { "type": "string", "minLength": 1 },
     "msg": { "type": "string" },
     "req_id": { "type": "string", "minLength": 1 },
-    "err": {
-      "type": "object",
-      "required": ["type", "message"],
-      "properties": {
-        "type": { "type": "string" },
-        "message": { "type": "string" },
-        "stack": { "type": "string" }
-      },
-      "additionalProperties": true
-    },
+    "err": { "$ref": "#/$defs/error" },
     "http": { "type": "object", "additionalProperties": true },
     "ctx": {
       "description": "Where caller fields that collided with a reserved envelope key are relocated (as an object)."
     }
   },
-  "additionalProperties": true
+  "additionalProperties": true,
+  "$defs": {
+    "error": {
+      "description": "Allowlisted error. These are the only keys ever emitted; nothing else on the source error is copied.",
+      "type": "object",
+      "required": ["type", "message"],
+      "properties": {
+        "type": { "type": "string", "maxLength": 100 },
+        "message": { "type": "string", "maxLength": 2000 },
+        "stack": { "type": "string", "maxLength": 8000 },
+        "code": { "anyOf": [{ "type": "string", "maxLength": 100 }, { "type": "number" }] },
+        "status": { "type": "number" },
+        "cause": { "$ref": "#/$defs/errorOrMarker" },
+        "errors": { "type": "array", "maxItems": 10, "items": { "$ref": "#/$defs/errorOrMarker" } },
+        "errors_truncated": {
+          "description": "How many AggregateError entries beyond the first 10 were dropped.",
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "errorOrMarker": {
+      "description": "A nested error, or one of the strings [circular], [truncated] or [unreadable].",
+      "anyOf": [{ "$ref": "#/$defs/error" }, { "enum": ["[circular]", "[truncated]", "[unreadable]"] }]
+    }
+  }
 }
