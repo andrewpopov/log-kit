@@ -1,0 +1,67 @@
+{
+  "name": "@andrewpopov/log-kit",
+  "version": "0.0.0",
+  "description": "Fleet structured logging for Node services: one JSON line schema (v1), word levels, reserved envelope keys, synchronous stdout.",
+  "author": "Andrew Popov",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andrewpopov/log-kit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/andrewpopov/log-kit/issues"
+  },
+  "homepage": "https://github.com/andrewpopov/log-kit#readme",
+  "keywords": [
+    "logging",
+    "pino",
+    "json",
+    "typescript"
+  ],
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./schema/log-line.json": "./schema/log-line.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "schema"
+  ],
+  "engines": {
+    "node": "^22 || ^24 || >=26"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify:pack": "node scripts/verify-pack.mjs",
+    "verify:dist-fresh": "node scripts/verify-dist-fresh.mjs",
+    "audit:runtime": "npm audit --omit=dev --audit-level=high",
+    "audit:development": "npm audit --audit-level=high",
+    "verify": "npm run typecheck && npm test && npm run build && npm run verify:dist-fresh && npm run verify:pack && npm run audit:runtime && npm run audit:development",
+    "release:note": "release-kit note",
+    "release:notes": "release-kit notes",
+    "release:bump": "release-kit bump",
+    "release:cut": "release-kit cut",
+    "release:check": "release-kit check",
+    "release:hygiene": "release-kit hygiene",
+    "prepare": "git config core.hooksPath .githooks || true"
+  },
+  "devDependencies": {
+    "@andrewpopov/deploy-kit": "github:andrewpopov/deploy-kit#v0.25.0",
+    "@andrewpopov/release-kit": "github:andrewpopov/release-kit#v0.3.1",
+    "@types/node": "^20.14.0",
+    "ajv": "^8.20.0",
+    "typescript": "^5.5.0",
+    "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "pino": "10.4.0"
+  }
+}
