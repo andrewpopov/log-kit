@@ -3,8 +3,8 @@ import { LogConfigError } from './errors';
 import { resolveRedactPolicy } from './redact-policy';
 import type { RedactPolicy } from './redact-policy';
 import { relocateReserved } from './reserved';
-import { sanitize } from './sanitize';
-import { isError, normaliseFields } from './serialize-error';
+import { describeInstance, sanitize } from './sanitize';
+import { isError, isObject, isWalkable, normaliseFields } from './serialize-error';
 import { LOG_LEVELS } from './types';
 import type { CreateLoggerOptions, LogDestination, LogFields, Logger, LogLevel, LogMethod } from './types';
 
@@ -44,6 +44,13 @@ function openDestination(destination: LogDestination | undefined): pino.Destinat
   return pino.destination({ dest: requireName('destination.file', destination.file), sync: true });
 }
 
+/**
+ * A class instance given as the whole fields object or as child bindings would be enumerated before the sanitiser sees
+ * it, so it is shown by name instead, under `key`, exactly as one nested in a field is.
+ */
+const plainFields = (fields: LogFields, key: string): LogFields =>
+  isObject(fields) && !isWalkable(fields) ? { [key]: describeInstance(fields) } : fields;
+
 function wrap(base: pino.Logger, policy: RedactPolicy): Logger {
   const method =
     (level: LogLevel): LogMethod =>
@@ -53,7 +60,7 @@ function wrap(base: pino.Logger, policy: RedactPolicy): Logger {
         return;
       }
       // Pino would special-case a bare Error and stringify its enumerable properties; normalise it ourselves.
-      const fields = isError(first) ? { err: first } : first;
+      const fields = isError(first) ? { err: first } : plainFields(first, 'fields');
       base[level](relocateReserved(sanitize(normaliseFields(fields), policy)), sanitize(msg, policy));
     };
   return {
@@ -63,7 +70,7 @@ function wrap(base: pino.Logger, policy: RedactPolicy): Logger {
     warn: method('warn'),
     error: method('error'),
     fatal: method('fatal'),
-    child: (bindings) => wrap(base.child(relocateReserved(sanitize(normaliseFields(bindings), policy))), policy),
+    child: (bindings) => wrap(base.child(relocateReserved(sanitize(normaliseFields(plainFields(bindings, 'bindings')), policy))), policy),
   };
 }
 

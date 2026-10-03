@@ -1,6 +1,8 @@
 import type { RedactPolicy } from './redact-policy';
 import { sanitizeString } from './redact-string';
 export { sanitizeString };
+/** The constructor name, read from the prototype's own data property so no caller code runs. `[Object]` when there is none. */
+export declare function describeInstance(value: object): string;
 /**
  * The single choke point every caller-supplied value passes through before it reaches output: merge objects, child
  * bindings and the message. Always returns a freshly built tree of plain data, never the caller's own objects, so

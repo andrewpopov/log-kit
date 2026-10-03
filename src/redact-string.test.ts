@@ -43,6 +43,17 @@ describe('sanitizeString redacts', () => {
     ['a Basic credential that holds user:password', 'sent Basic dXNlcjpwYXNz now', 'sent Basic [REDACTED] now'],
     ['a short Basic credential with no digit', 'used Basic dTpw', 'used Basic [REDACTED]'],
     ['a Bearer credential that starts with a prose word', 'Authz is Bearer token-CANARYBT', 'Authz is Bearer [REDACTED]'],
+    ['SMTP_PASS', 'SMTP_PASS=CANARYSP host=x', 'SMTP_PASS=[REDACTED]'],
+    ['DB_PWD', 'DB_PWD=CANARYPWD', 'DB_PWD=[REDACTED]'],
+    ['smtpPass', 'smtpPass: CANARYCAMEL', 'smtpPass: [REDACTED]'],
+    ['OAUTH', 'OAUTH=CANARYOA', 'OAUTH=[REDACTED]'],
+    ['an Auth header', 'X-Auth: CANARYXA', 'X-Auth: [REDACTED]'],
+    ['tokenString, which merely starts like tokens', 'tokenString=CANARYTS', 'tokenString=[REDACTED]'],
+    ['tokenSigningKey', 'tokenSigningKey=CANARYTSK', 'tokenSigningKey=[REDACTED]'],
+    ['tokenCountKey, which is not a counter', 'tokenCountKey=CANARYTCK', 'tokenCountKey=[REDACTED]'],
+    ['a signing key name', 'signing_key=CANARYSIGN', 'signing_key=[REDACTED]'],
+    ['a Basic API key with no colon in it', 'Authz Basic U0VDUkVUa2V5Tm9Db2xvbg== x', 'Authz Basic [REDACTED] x'],
+    ['a Basic value of exactly 8 characters', 'Basic abcdefgh', 'Basic [REDACTED]'],
     ['a Google API key', 'key=AIzaCANARYxxxxxxxxxxxxxxxxxxxxxxxxxxxx', 'key=[REDACTED]'],
     ['npm, Hugging Face, GitLab and Stripe webhook secrets', 'npm_CANARYa1b2 hf_CANARYc3d4 glpat-CANARYe5 whsec_CANARYf6', '[REDACTED] [REDACTED] [REDACTED] [REDACTED]'],
     ['a PEM private key', 'bad key -----BEGIN PRIVATE KEY-----\nMIIEvCANARYPEM\n-----END PRIVATE KEY----- after', 'bad key [REDACTED] after'],
@@ -73,6 +84,8 @@ describe('sanitizeString leaves readable', () => {
     'Basic authentication and Basic configuration failed',
     'author=bob authenticated=true',
     'POST https://discord.com/api/webhooks failed',
+    'bypass=1 passed=3 compass=2 passage=4 tokens_used=5 inputTokens: 12 max_tokens: 100 token_count=7',
+    'Basic abcdefg',
   ])('%s', (text) => {
     expect(sanitizeString(text)).toBe(text);
   });
@@ -147,6 +160,12 @@ describe('sanitizeString runs in linear time', () => {
     'password=x\n',
     'npm_',
     'AIza',
+    'SMTP_PASS',
+    'smtpPass',
+    'pass=',
+    'tokenS',
+    'OAUTH',
+    'Basic abcdefgh',
   ];
 
   it.each(shapes)('1 MB of %j sanitises in under 100 ms', (unit) => {

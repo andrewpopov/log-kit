@@ -24,33 +24,57 @@ const URL_TAIL = new RegExp(String.raw`(?<=:\/\/[^${URL_END}?#]*)[?#][^${URL_END
 /** A query or fragment with no scheme (`/cb?code=abc`, `/cb#access_token=abc`): only when it opens with `name=`. */
 const RELATIVE_QUERY = new RegExp(String.raw`[?#](?=[\w%.~+\-\[\]]*=)[^${URL_END}]*`, 'g');
 
+/** A quoted string (escape-aware, so `"a\\"b"` is one value), otherwise everything to the end of the line. */
+const VALUE = String.raw`("(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'|[^\r\n]+)`;
+
+/** What follows a credential name: more name characters (up to 32), an optional quote, then `=` or `:`. */
+const NAME_END = String.raw`[\w.-]{0,32}["']?[ \t]*[=:][ \t]*`;
+
 /**
  * A credential name and the value after it: `password=hunter2`, `{"apiKey":"x"}`, `AWS_SECRET_ACCESS_KEY=x`,
- * `X-Session-Id: x`, `Authorization: Bearer x`, `Cookie: a=1; b=2`. The keyword may be followed by up to 32 more name
- * characters, so a longer name that contains it is caught. `token` is not matched when it is the start of `tokens` or
- * `token_count`, so usage counters stay readable.
+ * `X-Session-Id: x`, `Authorization: Bearer x`, `Cookie: a=1; b=2`, `tokenString=x`. The keyword may be followed by up
+ * to 32 more name characters, so a longer name that contains it is caught. `token` is skipped only when it is the whole
+ * of a usage counter, `tokens` or `token_count`, followed by something that is not a letter (`max_tokens=5`,
+ * `inputTokens: 12`); `tokenString`, `tokenSigningKey` and `tokensecret` are credentials.
  *
- * The value is a quoted string (escape-aware, so `"a\\"b"` is one value), otherwise everything to the end of the line:
- * `password: correct horse battery` is one secret, and so is a value opening `{` or `[`.
+ * The value is a quoted string or everything to the end of the line: `password: correct horse battery` is one secret,
+ * and so is a value opening `{` or `[`.
  */
-const NAME_VALUE =
-  /((?:password|passwd|secret|token(?!s|[-_.]?counts?)|api[_-]?key|private[_-]?key|signature|session|credentials?|authorization|cookie)[\w.-]{0,32}["']?[ \t]*[=:][ \t]*)("(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'|[^\r\n]+)/gi;
+const NAME_VALUE = new RegExp(
+  String.raw`((?:password|passwd|secret|oauth|token(?!s(?![a-z])|[-_.]?counts?(?![a-z]))|api[_-]?key|private[_-]?key|signing[_-]?key|encryption[_-]?key|master[_-]?key|signature|session|credentials?|authorization|cookie)${NAME_END})${VALUE}`,
+  'gi',
+);
 
 /**
- * `Bearer <x>` always, except when the next word is plain English (`bearer token expired`); the exception needs a
- * space or the end after the word, so `Bearer token-abc` is still a credential.
+ * `pass`, `pwd` and `auth` as a word of their own inside a name: `SMTP_PASS=x`, `DB_PWD=x`, `smtpPass=x`, `X-Auth: x`.
+ * Case matters here (a camelCase boundary is a lower-case letter then `Pass`), so there is no `i` flag. `password` and
+ * `author` have letters after the word and are not matched.
  */
-const BEARER =
-  /\b(Bearer)[ \t]+(?!(?:token|tokens|auth|authentication|authorization|scheme|header|credential|credentials|realm)(?!\S))[\w.~+/=%-]+/gi;
+const WORD_NAME_VALUE = new RegExp(
+  String.raw`((?:(?<![A-Za-z])(?:[Pp]ass|PASS|[Pp]wd|PWD|[Aa]uth|AUTH)|(?<=[a-z0-9])(?:Pass|Pwd|Auth))(?![a-z])${NAME_END})${VALUE}`,
+  'g',
+);
 
-/** `Basic <x>`: redacted when it is base64 of `user:password`, so `Basic authentication failed` stays readable. */
-const BASIC = /\b(Basic)[ \t]+([A-Za-z0-9+/_-]+={0,2})/gi;
+/** Words that follow `Bearer` or `Basic` in ordinary prose. A credential is never just one of these on its own. */
+const PROSE_WORDS = 'token|tokens|auth|authentication|authorization|scheme|header|credential|credentials|realm';
+
+/** `Bearer <x>` always, except for a prose word alone: `bearer token expired`, but `Bearer token-abc` is a credential. */
+const BEARER = new RegExp(String.raw`\b(Bearer)[ \t]+(?!(?:${PROSE_WORDS})(?!\S))[\w.~+/=%-]+`, 'gi');
+
+/**
+ * `Basic <x>`: every base64 value of 8 or more characters (a `user:password`, but also an API key with no colon);
+ * a shorter one when it decodes to something with a `:` in it. A prose word alone (`Basic authentication failed`) stays.
+ */
+const BASIC = new RegExp(String.raw`\b(Basic)[ \t]+(?!(?:${PROSE_WORDS}|configuration|config|usage|setup)(?!\S))([A-Za-z0-9+/_-]+={0,2})`, 'gi');
 
 /** Past this many decodes in one string the rest are redacted unread, which bounds the cost of a string made of them. */
 const MAX_BASIC_DECODES = 64;
+const MIN_BASIC_LENGTH = 8;
 
 function isBasicCredential(value: string, decodes: number): boolean {
-  return decodes > MAX_BASIC_DECODES || Buffer.from(value, 'base64').toString('latin1').includes(':');
+  return (
+    value.length >= MIN_BASIC_LENGTH || decodes > MAX_BASIC_DECODES || Buffer.from(value, 'base64').toString('latin1').includes(':')
+  );
 }
 
 const JWT = /(?<![\w-])eyJ[\w-]+\.[\w-]+\.[\w-]*/g;
@@ -102,6 +126,8 @@ const redactedValue = (value: string): string => {
   return (quote === '"' || quote === "'") && value.length > 1 ? `${quote}${REDACTED}${quote}` : REDACTED;
 };
 
+const redactNameValue = (_match: string, name: string, secret: string): string => `${name}${redactedValue(secret)}`;
+
 /**
  * Redaction for one string: the final message, string values anywhere in a line, object keys, error messages and
  * stacks. Idempotent, so a value that passes through twice reads the same.
@@ -112,7 +138,8 @@ export function sanitizeString(value: string): string {
     .replace(USERINFO, `://${REDACTED}@`)
     .replace(URL_TAIL, `?${REDACTED}`)
     .replace(RELATIVE_QUERY, `?${REDACTED}`)
-    .replace(NAME_VALUE, (_match, name: string, secret: string) => `${name}${redactedValue(secret)}`)
+    .replace(NAME_VALUE, redactNameValue)
+    .replace(WORD_NAME_VALUE, redactNameValue)
     .replace(BEARER, `$1 ${REDACTED}`)
     .replace(BASIC, (match, scheme: string, credential: string) =>
       isBasicCredential(credential, ++basicCredentials) ? `${scheme} ${REDACTED}` : match,

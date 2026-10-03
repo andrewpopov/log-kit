@@ -46,19 +46,22 @@ function isError(value) {
 function truncate(text, max) {
     return text.length <= max ? text : text.slice(0, max - exports.TRUNCATION_MARKER.length) + exports.TRUNCATION_MARKER;
 }
-/** True for a character that can be part of a credential: a cut that lands inside a run of these is moved back. */
-const isTokenChar = (code) => (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 45 || code === 95;
-/** A run of token characters longer than this is already long enough for any pattern to see, so a cut inside it is kept. */
-const MAX_PARTIAL_TOKEN = 64;
+/** Whitespace, a quote, an angle bracket, a backtick or a backslash: none can be inside a URL or a credential. */
+const isBreak = (code) => code <= 32 || code === 34 || code === 39 || code === 60 || code === 62 || code === 96 || code === 92;
+/** How far back a cut looks for a break. A cut never gives up more than half of `limit` either. */
+const MAX_CUT_BACKTRACK = 4096;
 /**
- * The first `limit` characters of `text`, moved back to the start of a short token the cut lands inside. A secret cut
- * in half would be too short for its pattern to recognise and would survive as a prefix; this keeps it whole or gone.
+ * The first `limit` characters of `text`, cut back to the last break so a word is either whole or gone. A word cut in
+ * half loses the context that identifies it: `https://u:secret@host` cut before `@host` no longer has userinfo, and
+ * `sk-abc` cut short is too short for its pattern. If there is no break nearby the partial word is dropped back to
+ * the edge of the look-back window, so nothing recognisable is ever left half cut.
  */
-function cutBeforePartialToken(text, limit) {
+function cutAtBreak(text, limit) {
+    const floor = limit - Math.min(MAX_CUT_BACKTRACK, limit >> 1);
     let end = limit;
-    while (end > 0 && limit - end < MAX_PARTIAL_TOKEN && isTokenChar(text.charCodeAt(end - 1)))
+    while (end > floor && !isBreak(text.charCodeAt(end - 1)))
         end--;
-    return limit - end < MAX_PARTIAL_TOKEN ? text.slice(0, end) : text.slice(0, limit);
+    return text.slice(0, end);
 }
 /**
  * Message-like text, redacted and then bounded to `max`. Redaction runs on at most `2 * max` characters, so a
@@ -67,14 +70,14 @@ function cutBeforePartialToken(text, limit) {
 function boundedText(text, max) {
     if (text.length <= max * 2)
         return truncate((0, redact_string_1.sanitizeString)(text), max);
-    const redacted = (0, redact_string_1.sanitizeString)(cutBeforePartialToken(text, max * 2));
+    const redacted = (0, redact_string_1.sanitizeString)(cutAtBreak(text, max * 2));
     return redacted.slice(0, max - exports.TRUNCATION_MARKER.length) + exports.TRUNCATION_MARKER;
 }
 function boundStack(stack) {
     const kept = [];
     let frames = 0;
     let cutFrames = stack.length > MAX_STACK * 2;
-    const input = cutFrames ? cutBeforePartialToken(stack, MAX_STACK * 2) : stack;
+    const input = cutFrames ? cutAtBreak(stack, MAX_STACK * 2) : stack;
     for (const line of (0, redact_string_1.sanitizeString)(input).split('\n')) {
         if (/^\s+at /.test(line) && ++frames > MAX_STACK_FRAMES) {
             cutFrames = true;

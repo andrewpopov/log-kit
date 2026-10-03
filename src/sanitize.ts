@@ -112,22 +112,21 @@ function sanitizeItems(items: Iterable<unknown>, walk: Walk, at: Position): unkn
 }
 
 /**
- * Header lists: `[['x-api-key', 'S']]` pairs and the flat `['Cookie', 'v', ...]` of a raw header list. Each name goes
- * through the key policy and the value that follows a credential name is replaced. A flat list is only taken for one
- * when every item is a string and there is an even number of them, so ordinary arrays of values are left to the walk.
+ * Header lists: the flat `['Cookie', 'v', ...]` of a raw header list, and a `['x-api-key', 'S']` pair. In any array, the
+ * element after one that reads as a credential name is replaced, whatever the array's length or mix of types. A list of
+ * words that happens to hold a credential name, such as `['password', 'email']`, loses the word after it too; that is
+ * the safe direction, and there is no telling a header list from a word list by shape alone.
  */
 function redactHeaderValues(items: unknown[], policy: RedactPolicy): unknown[] {
-  const head = items.slice(0, MAX_ITEMS);
-  if (head.length >= 2 && head.length % 2 === 0 && head.every((item) => typeof item === 'string')) {
-    return items.map((item, index) =>
-      index % 2 === 1 && index < MAX_ITEMS && protectsValue(items[index - 1] as string, item, policy) ? REDACTED : item,
-    );
+  const out = items.slice();
+  for (let i = 0; i + 1 < out.length && i < MAX_ITEMS; i++) {
+    const name = out[i];
+    if (typeof name === 'string' && protectsValue(name, out[i + 1], policy)) {
+      out[i + 1] = REDACTED;
+      i++; // the value just replaced is not itself a name
+    }
   }
-  return items.map((item) => {
-    if (!Array.isArray(item) || read(item, 'length') !== 2) return item;
-    const [name, value] = [read(item, 0), read(item, 1)];
-    return typeof name === 'string' && protectsValue(name, value, policy) ? [name, REDACTED] : item;
-  });
+  return out;
 }
 
 function sanitizeArray(source: unknown[], walk: Walk, at: Position): unknown[] {
@@ -187,7 +186,7 @@ function sanitizeBuiltin(value: object): unknown {
 }
 
 /** The constructor name, read from the prototype's own data property so no caller code runs. `[Object]` when there is none. */
-function describeInstance(value: object): string {
+export function describeInstance(value: object): string {
   try {
     const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(value) as object, 'constructor');
     const ctor: unknown = descriptor !== undefined && 'value' in descriptor ? descriptor.value : undefined;

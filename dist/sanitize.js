@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.sanitizeString = void 0;
+exports.describeInstance = describeInstance;
 exports.sanitize = sanitize;
 const node_util_1 = require("node:util");
 const redact_policy_1 = require("./redact-policy");
@@ -85,21 +86,21 @@ function sanitizeItems(items, walk, at) {
     return out;
 }
 /**
- * Header lists: `[['x-api-key', 'S']]` pairs and the flat `['Cookie', 'v', ...]` of a raw header list. Each name goes
- * through the key policy and the value that follows a credential name is replaced. A flat list is only taken for one
- * when every item is a string and there is an even number of them, so ordinary arrays of values are left to the walk.
+ * Header lists: the flat `['Cookie', 'v', ...]` of a raw header list, and a `['x-api-key', 'S']` pair. In any array, the
+ * element after one that reads as a credential name is replaced, whatever the array's length or mix of types. A list of
+ * words that happens to hold a credential name, such as `['password', 'email']`, loses the word after it too; that is
+ * the safe direction, and there is no telling a header list from a word list by shape alone.
  */
 function redactHeaderValues(items, policy) {
-    const head = items.slice(0, MAX_ITEMS);
-    if (head.length >= 2 && head.length % 2 === 0 && head.every((item) => typeof item === 'string')) {
-        return items.map((item, index) => index % 2 === 1 && index < MAX_ITEMS && protectsValue(items[index - 1], item, policy) ? redact_string_1.REDACTED : item);
+    const out = items.slice();
+    for (let i = 0; i + 1 < out.length && i < MAX_ITEMS; i++) {
+        const name = out[i];
+        if (typeof name === 'string' && protectsValue(name, out[i + 1], policy)) {
+            out[i + 1] = redact_string_1.REDACTED;
+            i++; // the value just replaced is not itself a name
+        }
     }
-    return items.map((item) => {
-        if (!Array.isArray(item) || (0, serialize_error_1.read)(item, 'length') !== 2)
-            return item;
-        const [name, value] = [(0, serialize_error_1.read)(item, 0), (0, serialize_error_1.read)(item, 1)];
-        return typeof name === 'string' && protectsValue(name, value, policy) ? [name, redact_string_1.REDACTED] : item;
-    });
+    return out;
 }
 function sanitizeArray(source, walk, at) {
     const length = (0, serialize_error_1.read)(source, 'length');

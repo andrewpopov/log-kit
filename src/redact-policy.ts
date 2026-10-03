@@ -38,7 +38,10 @@ const EXACT_KEYS: readonly string[] = [
 /**
  * Normalised keys containing one of these are credentials. `token` is handled apart (see `classifyKey`). Beyond the
  * required list, `passwd`, `authorization`, `cookie` and `privatekey` also match as substrings, because the object
- * under `cookies` or `authorizationHeader` is exactly as sensitive as the one under `cookie`.
+ * under `cookies` or `authorizationHeader` is exactly as sensitive as the one under `cookie`. `credential` (so
+ * `userCredential`), the `*key` names that are keys to something (`signing`, `encryption`, `master`) and `auth` followed
+ * by `header`, `key`, `code` or `value` are included for the same reason. A `pass` or `pwd` that is a word of its own
+ * inside a name (`smtpPass`, `DB_PWD`) is a credential too, but that needs the word boundaries `classifyKey` reads.
  *
  * `auth` is not a substring: it would redact `author`, `authored` and `authenticated: true`. Instead `auth` is an exact
  * name (Nodemailer's `{ auth: { user, pass } }`) and any key that ends in `auth` (`oauth`, `x-auth`, `smtp_auth`) matches.
@@ -54,6 +57,14 @@ const SECRET_SUBSTRINGS: readonly string[] = [
   'authorization',
   'cookie',
   'privatekey',
+  'signingkey',
+  'encryptionkey',
+  'masterkey',
+  'credential',
+  'authheader',
+  'authkey',
+  'authcode',
+  'authvalue',
 ];
 
 /** Keys whose value is a request or response body: omitted unless an allowed path says otherwise. */
@@ -91,35 +102,43 @@ function decodeLayer(text: string): { readonly text: string; readonly failed: bo
 
 interface NormalisedKey {
   readonly name: string;
+  /** The separate words of the key (camelCase and punctuation boundaries), lower-cased. */
+  readonly words: readonly string[];
   /** The key could not be read as a plain name: invalid UTF-8 in an escape, or encoding nested past the layer limit. */
   readonly undecodable: boolean;
 }
 
 /**
- * Percent-decoded to a fixed point, then compatibility-decomposed (NFKD) so `ｐａｓｓｗｏｒｄ`, `paſſword` and `İ` read
- * as ASCII; combining marks and format characters (zero-width, soft hyphen) are dropped, the result is lower-cased
- * and `-`, `_`, `.`, `:` and whitespace are removed.
+ * Compatibility decomposition (NFKD), so `ｐａｓｓｗｏｒｄ`, `paſſword`, `İ` and the full-width `％７０` read as ASCII, then
+ * the characters that show nothing are dropped: combining marks, every default-ignorable code point (zero-width, soft
+ * hyphen, Hangul fillers) and the braille blank.
+ */
+const foldKey = (text: string): string => text.normalize('NFKD').replace(/[\p{M}\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, '');
+
+/** Where a camelCase or punctuation boundary falls: `smtpPass`, `DB_PWD`, `HTTPServer`. */
+const WORD_BOUNDARY = /[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/;
+
+/**
+ * Folds and percent-decodes together until neither changes the key, because each can create input for the other
+ * (`%\u200b70` folds to `%70`, which decodes to `p`). A key still changing after 8 decodes is not a plain name. The
+ * result is lower-cased and has `-`, `_`, `.`, `:` and whitespace removed.
  */
 function readKey(key: string): NormalisedKey {
   let current = key;
   let undecodable = false;
-  for (let layer = 0; ; layer++) {
-    const next = decodeLayer(current);
+  let settled = false;
+  for (let pass = 0; pass <= MAX_DECODE_LAYERS && !settled; pass++) {
+    const next = decodeLayer(foldKey(current));
     undecodable ||= next.failed;
-    if (next.text === current) break;
+    settled = next.text === current;
     current = next.text;
-    if (layer + 1 >= MAX_DECODE_LAYERS) {
-      undecodable = true;
-      break;
-    }
   }
-  const name = current
-    .normalize('NFKD')
-    .replace(/[\p{M}\p{Cf}]/gu, '')
-    .toLowerCase()
-    .replace(/\u0131/g, 'i')
-    .replace(/[-_.:\s]/g, '');
-  return { name, undecodable };
+  const folded = foldKey(current);
+  return {
+    name: folded.toLowerCase().replace(/\u0131/g, 'i').replace(/[-_.:\s]/g, ''),
+    words: folded.split(WORD_BOUNDARY).filter(Boolean).map((word) => word.toLowerCase()),
+    undecodable: undecodable || !settled,
+  };
 }
 
 export const normaliseKey = (key: string): string => readKey(key).name;
@@ -127,8 +146,8 @@ export const normaliseKey = (key: string): string => readKey(key).name;
 const NORMALISED_EXACT_KEYS: ReadonlySet<string> = new Set(EXACT_KEYS.map(normaliseKey));
 
 export function classifyKey(rawKey: string, policy: RedactPolicy): KeyClass {
-  const { name: key, undecodable } = readKey(rawKey);
-  if (undecodable) return 'secret';
+  const { name: key, words, undecodable } = readKey(rawKey);
+  if (undecodable || words.includes('pass') || words.includes('pwd')) return 'secret';
   if (NORMALISED_EXACT_KEYS.has(key) || policy.extraKeys.has(key) || key.endsWith('auth')) return 'secret';
   if (SECRET_SUBSTRINGS.some((fragment) => key.includes(fragment))) return 'secret';
   const withoutCounters = key.replace(TOKEN_COUNTER, '');

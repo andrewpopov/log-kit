@@ -832,3 +832,110 @@ describe('review findings: reserved keys', () => {
     expect(({} as Record<string, unknown>).ctx).toBeUndefined();
   });
 });
+
+describe('re-review findings', () => {
+  class Session {
+    readonly id = 'CANARY-SESSID';
+    readonly inner = { token: 'CANARY-INNER' };
+  }
+  const asFields = (value: object): Record<string, unknown> => value as unknown as Record<string, unknown>;
+
+  it('shows a class instance given as the whole fields object, or as child bindings, by name only', () => {
+    const run = start();
+    run.log.info(asFields(new Session()), 'top level');
+    run.log.child(asFields(new Session())).info('child');
+    run.log.error(asFields(Object.assign(new Error('x'), { config: { headers: { Authorization: 'CANARY-ERR-AUTH' } } })), 'err as fields');
+    expectNoneEmitted(run, ['CANARY-SESSID', 'CANARY-INNER', 'CANARY-ERR-AUTH']);
+    const [first, second] = lines(run);
+    expect(first.fields).toBe('[Session]');
+    expect(second.bindings).toBe('[Session]');
+  });
+
+  it('keeps the S2 call forms: a bare Error, and a plain fields object', () => {
+    const run = start();
+    run.log.error(new Error('boom CANARY-BARE Bearer abcdef'));
+    run.log.info({ a: 1 }, 'plain');
+    expectNoneEmitted(run, ['abcdef']);
+    expect(lines(run)[1]).toMatchObject({ a: 1, msg: 'plain' });
+  });
+
+  it('never emits a URL password when the read-limit cut falls inside the URL', () => {
+    const secret = `CANARY${'A'.repeat(70)}`;
+    const tail = `https://u:${secret}@host`;
+    // The long query shrinks to a marker, which pulls the password inside the output window; the cut falls before `@host`.
+    const message = `${'https://h/?'.padEnd(4000 - tail.indexOf('@') - 1, 'x')} ${tail}`;
+    const failure = new Error(message);
+    failure.stack = '';
+    const run = start();
+    run.log.error(failure);
+    run.log.info({ v: `${'https://h/?'}${'q'.repeat(17_000)} ${'z '.repeat((32_768 - 17_012 - tail.indexOf('@') - 2) / 2)}${tail}` }, 'field');
+    expectNoneEmitted(run, [secret.slice(0, 20), 'https://u:']);
+  });
+
+  it('never emits half a JWT when the cut falls inside it', () => {
+    const jwt = `eyJhbGciOiJIUzI1NiJ9.${'eyJzdWIiOiJ1c2VyIn0'.repeat(10)}.SIGCANARY`;
+    const run = start();
+    run.log.info({ v: `https://h/p?${'q'.repeat(17_000)} ${'y'.repeat(32 * 1024 - 17_013 - 21 - 100 - 1)} ${jwt}${'x '.repeat(4000)}` }, 'x');
+    expectNoneEmitted(run, ['SIGCANARY', 'eyJhbGciOiJIUzI1NiJ9.eyJ']);
+  });
+
+  it.each(['credential', 'userCredential', 'authHeader', 'authKey', 'authCode', 'authValue', 'smtpPass', 'dbPwd', 'DB_PWD', 'user_pass', 'encryptionKey', 'signingKey', 'masterKey'])(
+    'redacts the value under the credential name %s',
+    (key) => {
+      const run = start();
+      run.log.info({ [key]: 'CANARY-NAME-VALUE' }, 'x');
+      expectNoneEmitted(run, ['CANARY-NAME-VALUE']);
+    },
+  );
+
+  it.each(['author', 'authored', 'passed', 'bypass', 'compass', 'passage', 'inputTokens', 'max_tokens'])('still shows %s', (key) => {
+    const run = start();
+    run.log.info({ [key]: 7 }, 'x');
+    expect(lines(run)[0][key]).toBe(7);
+  });
+
+  it('redacts credential names and values in free text: pass, pwd, oauth and token names that start like tokens', () => {
+    const run = start();
+    run.log.info('SMTP_PASS=CANARY-S1 DB_PWD=CANARY-S2\nOAUTH=CANARY-S3\ntokenString=CANARY-S4\ntokenSigningKey=CANARY-S5\nsmtpPass=CANARY-S6');
+    expectNoneEmitted(run, ['CANARY-S1', 'CANARY-S2', 'CANARY-S3', 'CANARY-S4', 'CANARY-S5', 'CANARY-S6']);
+  });
+
+  it.each([
+    ['odd length', ['X-Api-Key', 'CANARY-ODD', 'Host']],
+    ['a dangling name', ['Host', 'x', 'Cookie']],
+    ['misaligned', ['Host', 'X-Api-Key', 'CANARY-MIS', 'x']],
+    ['mixed types', ['X-Api-Key', 'CANARY-MIX', 1, 2]],
+    ['a three-item pair', [['x-api-key', 'CANARY-TUPLE', 'x']]],
+  ])('redacts the value after a credential name in a list: %s', (_name, list) => {
+    const run = start();
+    run.log.info({ h: list, s: new Set([['x-api-key', 'CANARY-SET']]) }, 'x');
+    expectNoneEmitted(run, ['CANARY-ODD', 'CANARY-MIS', 'CANARY-MIX', 'CANARY-TUPLE', 'CANARY-SET']);
+  });
+
+  it('documents the over-redaction: a word after a credential name in an ordinary list is redacted too', () => {
+    const run = start();
+    run.log.info({ missing: ['password', 'email'], fine: ['alpha', 'beta'] }, 'x');
+    expect(lines(run)[0]).toMatchObject({ missing: ['password', '[REDACTED]'], fine: ['alpha', 'beta'] });
+  });
+
+  it.each([
+    ['a full-width percent sign', '％７０assword'],
+    ['an invisible character inside an escape', '%​70assword'],
+    ['a Hangul filler', 'passㅤword'],
+    ['a braille blank', 'pass⠀word'],
+    ['a combining grapheme joiner', 'pa​ss͏word'],
+    ['an escape that only appears after folding, nested', '％２５７０assword'],
+  ])('redacts a key spelled with %s', (_name, key) => {
+    const run = start();
+    run.log.info({ [key]: 'CANARY-FOLD' }, 'x');
+    expectNoneEmitted(run, ['CANARY-FOLD']);
+  });
+
+  it('redacts every Basic value of 8 or more characters, with or without a colon, and survives 64 decoys', () => {
+    const run = start();
+    const noColon = Buffer.from('CANARY-KEY-NO-COLON').toString('base64');
+    const withColon = Buffer.from('user:CANARY-PW').toString('base64');
+    run.log.info(`Authz Basic ${noColon} and ${'Basic aaaa '.repeat(64)}Basic ${withColon}`);
+    expectNoneEmitted(run, [noColon, withColon]);
+  });
+});

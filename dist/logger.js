@@ -41,6 +41,11 @@ function openDestination(destination) {
         return pino_1.default.destination({ fd: 1, sync: true });
     return pino_1.default.destination({ dest: requireName('destination.file', destination.file), sync: true });
 }
+/**
+ * A class instance given as the whole fields object or as child bindings would be enumerated before the sanitiser sees
+ * it, so it is shown by name instead, under `key`, exactly as one nested in a field is.
+ */
+const plainFields = (fields, key) => (0, serialize_error_1.isObject)(fields) && !(0, serialize_error_1.isWalkable)(fields) ? { [key]: (0, sanitize_1.describeInstance)(fields) } : fields;
 function wrap(base, policy) {
     const method = (level) => (first, msg) => {
         if (typeof first === 'string') {
@@ -48,7 +53,7 @@ function wrap(base, policy) {
             return;
         }
         // Pino would special-case a bare Error and stringify its enumerable properties; normalise it ourselves.
-        const fields = (0, serialize_error_1.isError)(first) ? { err: first } : first;
+        const fields = (0, serialize_error_1.isError)(first) ? { err: first } : plainFields(first, 'fields');
         base[level]((0, reserved_1.relocateReserved)((0, sanitize_1.sanitize)((0, serialize_error_1.normaliseFields)(fields), policy)), (0, sanitize_1.sanitize)(msg, policy));
     };
     return {
@@ -58,7 +63,7 @@ function wrap(base, policy) {
         warn: method('warn'),
         error: method('error'),
         fatal: method('fatal'),
-        child: (bindings) => wrap(base.child((0, reserved_1.relocateReserved)((0, sanitize_1.sanitize)((0, serialize_error_1.normaliseFields)(bindings), policy))), policy),
+        child: (bindings) => wrap(base.child((0, reserved_1.relocateReserved)((0, sanitize_1.sanitize)((0, serialize_error_1.normaliseFields)(plainFields(bindings, 'bindings')), policy))), policy),
     };
 }
 function resolveConfig(options) {
