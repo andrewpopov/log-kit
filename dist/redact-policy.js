@@ -1,7 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DEFAULT_REDACT_POLICY = void 0;
-exports.normaliseKey = normaliseKey;
+exports.DEFAULT_REDACT_POLICY = exports.normaliseKey = void 0;
 exports.classifyKey = classifyKey;
 exports.resolveRedactPolicy = resolveRedactPolicy;
 const errors_1 = require("./errors");
@@ -17,6 +16,9 @@ const EXACT_KEYS = [
     'x-auth-token',
     'password',
     'passwd',
+    'pass',
+    'pwd',
+    'auth',
     'secret',
     'client_secret',
     'private_key',
@@ -26,6 +28,9 @@ const EXACT_KEYS = [
  * Normalised keys containing one of these are credentials. `token` is handled apart (see `classifyKey`). Beyond the
  * required list, `passwd`, `authorization`, `cookie` and `privatekey` also match as substrings, because the object
  * under `cookies` or `authorizationHeader` is exactly as sensitive as the one under `cookie`.
+ *
+ * `auth` is not a substring: it would redact `author`, `authored` and `authenticated: true`. Instead `auth` is an exact
+ * name (Nodemailer's `{ auth: { user, pass } }`) and any key that ends in `auth` (`oauth`, `x-auth`, `smtp_auth`) matches.
  */
 const SECRET_SUBSTRINGS = [
     'secret',
@@ -46,32 +51,65 @@ const BODY_KEYS = new Set(['body', 'payload', 'data', 'rawbody']);
  * `max_tokens`, `cache_read_input_tokens`) and `token_count`. They are removed before looking for a credential token.
  */
 const TOKEN_COUNTER = /tokens|tokencounts?/g;
-/** Percent-decodes only the valid `%XX` runs, so one bad escape cannot shield the rest of the key from decoding. */
-function decodeEscapes(text) {
-    return text.replace(/(?:%[0-9a-fA-F]{2})+/g, (run) => {
+/** How many layers of percent-encoding a key is unwrapped. A key that is still changing after this is not a plain name. */
+const MAX_DECODE_LAYERS = 8;
+/**
+ * One layer of percent-decoding. Each ASCII `%XX` is decoded on its own, so one bad escape cannot shield the rest.
+ * `failed` is set when an escape for a non-ASCII byte is not valid UTF-8 and has to stay encoded.
+ */
+function decodeLayer(text) {
+    let failed = false;
+    const decoded = text.replace(/(?:%[0-9a-fA-F]{2})+/g, (run) => {
         try {
             return decodeURIComponent(run);
         }
         catch {
-            return run;
+            return run.replace(/%([0-9a-fA-F]{2})/g, (escape, hex) => {
+                const code = parseInt(hex, 16);
+                if (code < 0x80)
+                    return String.fromCharCode(code);
+                failed = true;
+                return escape;
+            });
         }
     });
+    return { text: decoded, failed };
 }
-/** Lower-cased, percent-decoded (to a fixed point, at most three layers) and with `-`, `_` and whitespace removed. */
-function normaliseKey(key) {
-    let decoded = key;
-    for (let layer = 0; layer < 3; layer++) {
-        const next = decodeEscapes(decoded);
-        if (next === decoded)
+/**
+ * Percent-decoded to a fixed point, then compatibility-decomposed (NFKD) so `ｐａｓｓｗｏｒｄ`, `paſſword` and `İ` read
+ * as ASCII; combining marks and format characters (zero-width, soft hyphen) are dropped, the result is lower-cased
+ * and `-`, `_`, `.`, `:` and whitespace are removed.
+ */
+function readKey(key) {
+    let current = key;
+    let undecodable = false;
+    for (let layer = 0;; layer++) {
+        const next = decodeLayer(current);
+        undecodable || (undecodable = next.failed);
+        if (next.text === current)
             break;
-        decoded = next;
+        current = next.text;
+        if (layer + 1 >= MAX_DECODE_LAYERS) {
+            undecodable = true;
+            break;
+        }
     }
-    return decoded.toLowerCase().replace(/[-_\s]/g, '');
+    const name = current
+        .normalize('NFKD')
+        .replace(/[\p{M}\p{Cf}]/gu, '')
+        .toLowerCase()
+        .replace(/\u0131/g, 'i')
+        .replace(/[-_.:\s]/g, '');
+    return { name, undecodable };
 }
-const NORMALISED_EXACT_KEYS = new Set(EXACT_KEYS.map(normaliseKey));
+const normaliseKey = (key) => readKey(key).name;
+exports.normaliseKey = normaliseKey;
+const NORMALISED_EXACT_KEYS = new Set(EXACT_KEYS.map(exports.normaliseKey));
 function classifyKey(rawKey, policy) {
-    const key = normaliseKey(rawKey);
-    if (NORMALISED_EXACT_KEYS.has(key) || policy.extraKeys.has(key))
+    const { name: key, undecodable } = readKey(rawKey);
+    if (undecodable)
+        return 'secret';
+    if (NORMALISED_EXACT_KEYS.has(key) || policy.extraKeys.has(key) || key.endsWith('auth'))
         return 'secret';
     if (SECRET_SUBSTRINGS.some((fragment) => key.includes(fragment)))
         return 'secret';
@@ -103,7 +141,7 @@ function properPrefixes(path) {
 function resolveRedactPolicy(options) {
     if (options === undefined)
         return exports.DEFAULT_REDACT_POLICY;
-    const keys = requireStringList('redact.keys', options.keys).map(normaliseKey);
+    const keys = requireStringList('redact.keys', options.keys).map(exports.normaliseKey);
     if (keys.some((key) => key.length === 0)) {
         throw new errors_1.LogConfigError('INVALID_ARGUMENT', 'redact.keys entries must contain a character besides -, _ and whitespace');
     }

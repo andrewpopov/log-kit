@@ -26,6 +26,9 @@ const EXACT_KEYS: readonly string[] = [
   'x-auth-token',
   'password',
   'passwd',
+  'pass',
+  'pwd',
+  'auth',
   'secret',
   'client_secret',
   'private_key',
@@ -36,6 +39,9 @@ const EXACT_KEYS: readonly string[] = [
  * Normalised keys containing one of these are credentials. `token` is handled apart (see `classifyKey`). Beyond the
  * required list, `passwd`, `authorization`, `cookie` and `privatekey` also match as substrings, because the object
  * under `cookies` or `authorizationHeader` is exactly as sensitive as the one under `cookie`.
+ *
+ * `auth` is not a substring: it would redact `author`, `authored` and `authenticated: true`. Instead `auth` is an exact
+ * name (Nodemailer's `{ auth: { user, pass } }`) and any key that ends in `auth` (`oauth`, `x-auth`, `smtp_auth`) matches.
  */
 const SECRET_SUBSTRINGS: readonly string[] = [
   'secret',
@@ -59,33 +65,71 @@ const BODY_KEYS: ReadonlySet<string> = new Set(['body', 'payload', 'data', 'rawb
  */
 const TOKEN_COUNTER = /tokens|tokencounts?/g;
 
-/** Percent-decodes only the valid `%XX` runs, so one bad escape cannot shield the rest of the key from decoding. */
-function decodeEscapes(text: string): string {
-  return text.replace(/(?:%[0-9a-fA-F]{2})+/g, (run) => {
+/** How many layers of percent-encoding a key is unwrapped. A key that is still changing after this is not a plain name. */
+const MAX_DECODE_LAYERS = 8;
+
+/**
+ * One layer of percent-decoding. Each ASCII `%XX` is decoded on its own, so one bad escape cannot shield the rest.
+ * `failed` is set when an escape for a non-ASCII byte is not valid UTF-8 and has to stay encoded.
+ */
+function decodeLayer(text: string): { readonly text: string; readonly failed: boolean } {
+  let failed = false;
+  const decoded = text.replace(/(?:%[0-9a-fA-F]{2})+/g, (run) => {
     try {
       return decodeURIComponent(run);
     } catch {
-      return run;
+      return run.replace(/%([0-9a-fA-F]{2})/g, (escape, hex: string) => {
+        const code = parseInt(hex, 16);
+        if (code < 0x80) return String.fromCharCode(code);
+        failed = true;
+        return escape;
+      });
     }
   });
+  return { text: decoded, failed };
 }
 
-/** Lower-cased, percent-decoded (to a fixed point, at most three layers) and with `-`, `_` and whitespace removed. */
-export function normaliseKey(key: string): string {
-  let decoded = key;
-  for (let layer = 0; layer < 3; layer++) {
-    const next = decodeEscapes(decoded);
-    if (next === decoded) break;
-    decoded = next;
-  }
-  return decoded.toLowerCase().replace(/[-_\s]/g, '');
+interface NormalisedKey {
+  readonly name: string;
+  /** The key could not be read as a plain name: invalid UTF-8 in an escape, or encoding nested past the layer limit. */
+  readonly undecodable: boolean;
 }
+
+/**
+ * Percent-decoded to a fixed point, then compatibility-decomposed (NFKD) so `ｐａｓｓｗｏｒｄ`, `paſſword` and `İ` read
+ * as ASCII; combining marks and format characters (zero-width, soft hyphen) are dropped, the result is lower-cased
+ * and `-`, `_`, `.`, `:` and whitespace are removed.
+ */
+function readKey(key: string): NormalisedKey {
+  let current = key;
+  let undecodable = false;
+  for (let layer = 0; ; layer++) {
+    const next = decodeLayer(current);
+    undecodable ||= next.failed;
+    if (next.text === current) break;
+    current = next.text;
+    if (layer + 1 >= MAX_DECODE_LAYERS) {
+      undecodable = true;
+      break;
+    }
+  }
+  const name = current
+    .normalize('NFKD')
+    .replace(/[\p{M}\p{Cf}]/gu, '')
+    .toLowerCase()
+    .replace(/\u0131/g, 'i')
+    .replace(/[-_.:\s]/g, '');
+  return { name, undecodable };
+}
+
+export const normaliseKey = (key: string): string => readKey(key).name;
 
 const NORMALISED_EXACT_KEYS: ReadonlySet<string> = new Set(EXACT_KEYS.map(normaliseKey));
 
 export function classifyKey(rawKey: string, policy: RedactPolicy): KeyClass {
-  const key = normaliseKey(rawKey);
-  if (NORMALISED_EXACT_KEYS.has(key) || policy.extraKeys.has(key)) return 'secret';
+  const { name: key, undecodable } = readKey(rawKey);
+  if (undecodable) return 'secret';
+  if (NORMALISED_EXACT_KEYS.has(key) || policy.extraKeys.has(key) || key.endsWith('auth')) return 'secret';
   if (SECRET_SUBSTRINGS.some((fragment) => key.includes(fragment))) return 'secret';
   const withoutCounters = key.replace(TOKEN_COUNTER, '');
   if (withoutCounters.includes('token')) return 'secret';

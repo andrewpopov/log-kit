@@ -10,8 +10,7 @@ export interface RedactPolicy {
     /** Every proper dotted prefix of an allowed path: the nodes a body walk must descend through to reach it. */
     readonly allowPrefixes: ReadonlySet<string>;
 }
-/** Lower-cased, percent-decoded (to a fixed point, at most three layers) and with `-`, `_` and whitespace removed. */
-export declare function normaliseKey(key: string): string;
+export declare const normaliseKey: (key: string) => string;
 export declare function classifyKey(rawKey: string, policy: RedactPolicy): KeyClass;
 export declare const DEFAULT_REDACT_POLICY: RedactPolicy;
 /** Validates `createLogger({ redact })` and merges it over the built-in policy. Options can only add to it. */

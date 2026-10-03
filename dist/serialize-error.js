@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.isWalkable = exports.isObject = exports.unreadable = exports.MAX_FIELD_DEPTH = exports.TRUNCATED = exports.CIRCULAR = exports.UNREADABLE = exports.TRUNCATION_MARKER = void 0;
 exports.read = read;
 exports.isError = isError;
+exports.boundedText = boundedText;
 exports.serializeError = serializeError;
 exports.normaliseFields = normaliseFields;
 const node_util_1 = require("node:util");
@@ -19,7 +20,7 @@ const MAX_STACK_FRAMES = 50;
 /** Error levels kept: the error itself is depth 1, so at most four nested causes. */
 const MAX_ERROR_DEPTH = 5;
 const MAX_AGGREGATE_ERRORS = 10;
-/** How deep `normaliseFields` looks for an Error inside a caller's fields. */
+/** How deep `sanitize` walks a caller's fields. */
 exports.MAX_FIELD_DEPTH = 8;
 exports.unreadable = Symbol('unreadable');
 const GENERIC_TYPE_NAMES = new Set(['', 'Object', 'Error']);
@@ -45,13 +46,36 @@ function isError(value) {
 function truncate(text, max) {
     return text.length <= max ? text : text.slice(0, max - exports.TRUNCATION_MARKER.length) + exports.TRUNCATION_MARKER;
 }
-/** Message-like text: redacted first so a secret cut in half by the bound cannot survive as a prefix. */
-const boundedText = (text, max) => truncate((0, redact_string_1.sanitizeString)(text), max);
+/** True for a character that can be part of a credential: a cut that lands inside a run of these is moved back. */
+const isTokenChar = (code) => (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 45 || code === 95;
+/** A run of token characters longer than this is already long enough for any pattern to see, so a cut inside it is kept. */
+const MAX_PARTIAL_TOKEN = 64;
+/**
+ * The first `limit` characters of `text`, moved back to the start of a short token the cut lands inside. A secret cut
+ * in half would be too short for its pattern to recognise and would survive as a prefix; this keeps it whole or gone.
+ */
+function cutBeforePartialToken(text, limit) {
+    let end = limit;
+    while (end > 0 && limit - end < MAX_PARTIAL_TOKEN && isTokenChar(text.charCodeAt(end - 1)))
+        end--;
+    return limit - end < MAX_PARTIAL_TOKEN ? text.slice(0, end) : text.slice(0, limit);
+}
+/**
+ * Message-like text, redacted and then bounded to `max`. Redaction runs on at most `2 * max` characters, so a
+ * 50 MB string costs the same as a 2 `max` one; anything cut ends in the truncation marker.
+ */
+function boundedText(text, max) {
+    if (text.length <= max * 2)
+        return truncate((0, redact_string_1.sanitizeString)(text), max);
+    const redacted = (0, redact_string_1.sanitizeString)(cutBeforePartialToken(text, max * 2));
+    return redacted.slice(0, max - exports.TRUNCATION_MARKER.length) + exports.TRUNCATION_MARKER;
+}
 function boundStack(stack) {
     const kept = [];
     let frames = 0;
-    let cutFrames = false;
-    for (const line of (0, redact_string_1.sanitizeString)(stack).split('\n')) {
+    let cutFrames = stack.length > MAX_STACK * 2;
+    const input = cutFrames ? cutBeforePartialToken(stack, MAX_STACK * 2) : stack;
+    for (const line of (0, redact_string_1.sanitizeString)(input).split('\n')) {
         if (/^\s+at /.test(line) && ++frames > MAX_STACK_FRAMES) {
             cutFrames = true;
             break;
@@ -185,52 +209,18 @@ const isWalkable = (value) => {
     }
 };
 exports.isWalkable = isWalkable;
-function walk(value, depth, path) {
-    if (isError(value))
-        return serializeError(value);
-    if (!(0, exports.isObject)(value) || !(0, exports.isWalkable)(value))
-        return value;
-    if (path.has(value))
-        return exports.CIRCULAR;
-    if (depth > exports.MAX_FIELD_DEPTH)
-        return exports.TRUNCATED;
-    path.add(value);
-    try {
-        if (Array.isArray(value)) {
-            const length = read(value, 'length');
-            const items = [];
-            for (let i = 0; typeof length === 'number' && i < length; i++)
-                items.push(readField(value, i, depth, path));
-            return items;
-        }
-        return Object.fromEntries(Object.keys(value).map((key) => [key, readField(value, key, depth, path)]));
-    }
-    catch {
-        return exports.UNREADABLE;
-    }
-    finally {
-        path.delete(value);
-    }
-}
-function readField(source, key, depth, path) {
-    const value = read(source, key);
-    return value === exports.unreadable ? exports.UNREADABLE : walk(value, depth + 1, path);
-}
 /**
- * Makes every Error inside caller fields safe before pino sees it: pino's
- * stringifier would otherwise emit an Error's enumerable properties (an axios
- * error's `config.headers.Authorization`). The `err` key always goes through
- * `serializeError`, whatever it holds; an Error anywhere else, however deeply
- * nested in plain objects and arrays, is replaced by the same allowlisted form.
+ * Prepares caller fields for `sanitize`: the `err` key always goes through `serializeError`, whatever it holds, so
+ * what is logged under it is the allowlisted form; undefined values are dropped. Everything else is left to
+ * `sanitize`, which serialises an Error found anywhere inside the fields the same way and owns every bound.
  */
 function normaliseFields(fields) {
-    const path = new Set([fields]);
     const entries = [];
     for (const key of Object.keys(fields)) {
         const value = read(fields, key);
         if (value === undefined)
             continue;
-        entries.push([key, value === exports.unreadable ? exports.UNREADABLE : key === 'err' ? serializeError(value) : walk(value, 1, path)]);
+        entries.push([key, value === exports.unreadable ? exports.UNREADABLE : key === 'err' ? serializeError(value) : value]);
     }
     // fromEntries defines own properties, so a hostile `__proto__` key stays data instead of reassigning the prototype.
     return Object.fromEntries(entries);

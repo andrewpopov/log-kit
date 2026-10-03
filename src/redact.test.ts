@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import { IncomingMessage } from 'node:http';
+import { Socket } from 'node:net';
 import { join } from 'node:path';
 import Ajv2020 from 'ajv/dist/2020';
 import { describe, expect, it } from 'vitest';
@@ -206,7 +208,7 @@ describe('canary: no secret reaches the raw bytes, through every entry point', (
     expectNoneEmitted(run, ['CANARY-FREE-BEARER', 'CANARY-FREE2-BEARER', JWT, JWT.split('.')[1]]);
   });
 
-  it('a class instance, a boxed string and a Date: own data is walked, toJSON is never called', () => {
+  it('a class instance is shown by name only, a boxed string and a Date are rendered, toJSON is never called', () => {
     class Holder {
       readonly secret = 'CANARY-CLASS-SECRET';
       readonly visible = 'shown';
@@ -225,9 +227,9 @@ describe('canary: no secret reaches the raw bytes, through every entry point', (
       },
       'objects',
     );
-    expectNoneEmitted(run, ['CANARY-CLASS-SECRET', 'CANARY-BOXED', 'CANARY-OWN-TOJSON']);
+    expectNoneEmitted(run, ['CANARY-CLASS-SECRET', 'shown', 'CANARY-BOXED', 'CANARY-OWN-TOJSON']);
     expect(lines(run)[0]).toMatchObject({
-      holder: { secret: '[REDACTED]', visible: 'shown' },
+      holder: '[Holder]',
       boxed: 'Bearer [REDACTED]',
       when: '2026-10-02T00:00:00.000Z',
       bad: null,
@@ -389,17 +391,14 @@ describe('bounds', () => {
     list.push(list);
     const map = new Map<string, unknown>();
     map.set('me', map);
-    const holder = new (class Holder { self: unknown; })();
-    holder.self = holder;
-    run.log.info({ loop, list, map, holder }, 'cycles');
-    expect(lines(run)[0]).toMatchObject({ loop: { name: 'loop', self: '[circular]' }, list: ['[circular]'], map: [['me', '[circular]']], holder: { self: '[circular]' } });
+    run.log.info({ loop, list, map }, 'cycles');
+    expect(lines(run)[0]).toMatchObject({ loop: { name: 'loop', self: '[circular]' }, list: ['[circular]'], map: [['me', '[circular]']] });
   });
 
   it('does not call a throwing getter twice and renders it [unreadable]', () => {
     const run = start();
     let reads = 0;
-    class WithGetter {}
-    const instance = new WithGetter();
+    const instance = Object.create(null) as Record<string, unknown>;
     Object.defineProperty(instance, 'boom', {
       enumerable: true,
       get() {
@@ -586,5 +585,250 @@ describe('the line schema', () => {
     run.log.error({ err: new Error('Bearer abc') }, 'b');
     run.log.child({ token: 'z' }).warn('c');
     expect(lines(run)).toHaveLength(3);
+  });
+});
+
+describe('review findings: class instances and header lists', () => {
+  it('shows an http.IncomingMessage by name and never its raw headers', () => {
+    const req = new IncomingMessage(new Socket());
+    req.rawHeaders = ['Host', 'h.example', 'X-Api-Key', 'CANARY-REQ-KEY', 'Cookie', 'sid=CANARY-REQ-SID', 'Authorization', 'Basic dXNlcjpwYXNz'];
+    req.headers = { 'x-api-key': 'CANARY-REQ-KEY', authorization: 'Basic dXNlcjpwYXNz' };
+    req.url = '/cb?code=CANARY-REQ-CODE';
+    const run = start();
+    run.log.info({ req }, 'incoming');
+    run.log.child({ req }).info('child');
+    expectNoneEmitted(run, ['CANARY-REQ-KEY', 'CANARY-REQ-SID', 'dXNlcjpwYXNz', 'CANARY-REQ-CODE', 'h.example']);
+    expect(lines(run)[0].req).toBe('[IncomingMessage]');
+  });
+
+  it('shows any class instance, Promise or Headers-like object by name only', () => {
+    class Session {
+      readonly id = 'CANARY-INSTANCE-ID';
+    }
+    const run = start();
+    run.log.info({ owner: new Session(), p: Promise.resolve('CANARY-PROMISE'), list: [new Session()], map: new Map([['k', new Session()]]) }, 'instances');
+    expectNoneEmitted(run, ['CANARY-INSTANCE-ID', 'CANARY-PROMISE']);
+    expect(lines(run)[0]).toMatchObject({ owner: '[Session]', p: '[Promise]', list: ['[Session]'], map: [['k', '[Session]']] });
+  });
+
+  it('keeps walking plain objects, null-prototype objects and arrays', () => {
+    const run = start();
+    const bare = Object.assign(Object.create(null) as Record<string, unknown>, { a: 1 });
+    run.log.info({ bare, nested: { list: [{ ok: true }] } }, 'plain');
+    expect(lines(run)[0]).toMatchObject({ bare: { a: 1 }, nested: { list: [{ ok: true }] } });
+  });
+
+  it('redacts the value after a credential name in header pair arrays, flat raw header lists and Maps', () => {
+    const run = start();
+    run.log.info(
+      {
+        pairs: [['x-api-key', 'CANARY-PAIR-KEY'], ['Accept', 'json'], ['Set-Cookie', 'sid=CANARY-PAIR-COOKIE']],
+        rawHeaders: ['Host', 'h.example', 'X-Api-Key', 'CANARY-FLAT-KEY', 'Cookie', 'sid=CANARY-FLAT-SID', 'Authorization', 'Basic CANARY-FLAT-AUTH', 'Accept', 'json'],
+        headers: new Map([['proxy-authorization', 'CANARY-MAP-PROXY']]),
+      },
+      'headers',
+    );
+    expectNoneEmitted(run, ['CANARY-PAIR-KEY', 'CANARY-PAIR-COOKIE', 'CANARY-FLAT-KEY', 'CANARY-FLAT-SID', 'CANARY-FLAT-AUTH', 'CANARY-MAP-PROXY']);
+    const [line] = lines(run);
+    expect(line.pairs).toEqual([['x-api-key', '[REDACTED]'], ['Accept', 'json'], ['Set-Cookie', '[REDACTED]']]);
+    expect(line.rawHeaders).toEqual(['Host', 'h.example', 'X-Api-Key', '[REDACTED]', 'Cookie', '[REDACTED]', 'Authorization', '[REDACTED]', 'Accept', 'json']);
+  });
+
+  it('leaves ordinary string arrays and pairs alone', () => {
+    const run = start();
+    run.log.info({ words: ['alpha', 'beta', 'gamma'], pairs: [['a', 'b'], ['c', 'd']], flat: ['a', 'b', 'c', 'd'] }, 'plain lists');
+    expect(lines(run)[0]).toMatchObject({ words: ['alpha', 'beta', 'gamma'], pairs: [['a', 'b'], ['c', 'd']], flat: ['a', 'b', 'c', 'd'] });
+  });
+});
+
+describe('review findings: strings through the logger', () => {
+  it('escaped quotes, environment-style names, multi-word values and webhook paths never reach the bytes', () => {
+    const run = start();
+    run.log.info('body {"password":"ab\\"CANARY-ESC1"} and password="x\\"CANARY-ESC2"');
+    run.log.error(new Error('bad {"password":"ab\\"CANARY-ESC3"}'), 'failed');
+    run.log.info({ detail: JSON.stringify({ password: 'x"CANARY-ESC4' }) }, 'stringified');
+    run.log.child({ note: 'password="a\\"CANARY-ESC5"' }).info('child');
+    run.log.info({ error: { message: 'password="a\\"CANARY-ESC6"', stack: 'at x password="b\\"CANARY-ESC7"' } }, 'shape');
+    run.log.info('env AWS_SECRET_ACCESS_KEY=CANARY-AWS secret_key=CANARY-SK sessionId=CANARY-SID passwordConfirm=CANARY-PC');
+    run.log.info('X-Session-Id: CANARY-HDR\npassword: correct horse CANARY-BATTERY');
+    run.log.info({ hook: 'POST https://discord.com/api/webhooks/123456/CANARY-DISCORD', slack: 'https://hooks.slack.com/services/T000/B000/CANARY-SLACK', tg: 'https://api.telegram.org/bot123:CANARY-TG/getMe' }, 'hooks');
+    expectNoneEmitted(run, [
+      ...Array.from({ length: 7 }, (_, i) => `CANARY-ESC${i + 1}`),
+      'CANARY-AWS',
+      'CANARY-SK',
+      'CANARY-SID',
+      'CANARY-PC',
+      'CANARY-HDR',
+      'CANARY-BATTERY',
+      'CANARY-DISCORD',
+      'CANARY-SLACK',
+      'CANARY-TG',
+    ]);
+  });
+
+  it('Basic and Bearer credentials of any shape, new key prefixes and PEM blocks', () => {
+    const run = start();
+    run.log.info(
+      'a Basic dXNlcjpwYXNz b Basic dTpw c Bearer token-CANARY-BT d AIzaCANARY-GKEYxxxxxxxxxxxxxxxxxxxx e npm_CANARYNPM1 f hf_CANARYHF123 g glpat-CANARY-GL h whsec_CANARY-WH',
+    );
+    run.log.info({ pem: '-----BEGIN PRIVATE KEY-----\nCANARY-PEM\n-----END PRIVATE KEY-----', cut: '-----BEGIN RSA PRIVATE KEY-----\nCANARY-PEMCUT' }, 'pem');
+    expectNoneEmitted(run, ['dXNlcjpwYXNz', 'dTpw', 'CANARY-BT', 'CANARY-GKEY', 'CANARYNPM1', 'CANARYHF123', 'CANARY-GL', 'CANARY-WH', 'CANARY-PEM']);
+  });
+
+  it('keeps counters and prose readable after the wider name rule', () => {
+    const run = start();
+    run.log.info('tokens=5 inputTokens=12 max_tokens=100 token_count=3 author=bob Basic authentication ok');
+    expect(lines(run)[0].msg).toBe('tokens=5 inputTokens=12 max_tokens=100 token_count=3 author=bob Basic authentication ok');
+  });
+});
+
+describe('review findings: keys', () => {
+  it.each([
+    ['dotless I', 'authorİzation'],
+    ['long s', 'paſſword'],
+    ['zero-width space', 'pass​word'],
+    ['zero-width joiner', 'access‍token'],
+    ['soft hyphen', 'pass­word'],
+    ['fullwidth', 'ｐａｓｓｗｏｒｄ'],
+    ['Kelvin sign', 'apiKey'],
+    ['dot separated', 'api.key'],
+    ['colon separated', 'x:api:key'],
+    ['padded with spaces', ' Authorization '],
+    ['four layers of percent-encoding', '%25252541uthorization'],
+    ['one bad escape beside valid ones', '%FF%70%61%73%73%77%6F%72%64'],
+    ['an escape that is not valid UTF-8', 'name%FF'],
+    ['pass', 'pass'],
+    ['pwd', 'PWD'],
+    ['auth', 'auth'],
+    ['oauth', 'oauth'],
+    ['x-auth', 'X-Auth'],
+  ])('redacts the value under %s', (_name, key) => {
+    const run = start();
+    run.log.info({ [key]: 'CANARY-KEY-VALUE' }, 'x');
+    expectNoneEmitted(run, ['CANARY-KEY-VALUE']);
+  });
+
+  it.each(['author', 'authored', 'authenticated', 'authority', 'compass', 'passage'])(
+    'does not redact %s',
+    (key) => {
+      const run = start();
+      run.log.info({ [key]: 'visible-value' }, 'x');
+      expect(lines(run)[0][key]).toBe('visible-value');
+    },
+  );
+
+  it('redacts Nodemailer-style auth, and an allowed body path cannot expose these keys', () => {
+    const run = start({ redact: { allowPaths: ['data'] } });
+    run.log.info({ auth: { user: 'u', pass: 'CANARY-NM' }, data: { pwd: 'CANARY-PWD', 'pa​ss': 'ok', 'pass​word': 'CANARY-ZW' } }, 'x');
+    expectNoneEmitted(run, ['CANARY-NM', 'CANARY-PWD', 'CANARY-ZW']);
+  });
+});
+
+describe('review findings: bodies, Maps and Errors', () => {
+  it('omits a non-plain value inside an allowed body path: boxed string, Error in a Set, Date, Map', () => {
+    const run = start({ redact: { allowPaths: ['data.items.id'] } });
+    run.log.info(
+      {
+        data: { items: [new String('CANARY-BOXED-ITEM'), new Set([new Error('CANARY-SET-ERR')]), new Date(0), new Map([['k', 'CANARY-MAP-IN-BODY']]), { id: 1 }] },
+      },
+      'x',
+    );
+    expectNoneEmitted(run, ['CANARY-BOXED-ITEM', 'CANARY-SET-ERR', 'CANARY-MAP-IN-BODY', '1970-01-01']);
+    expect((lines(run)[0].data as { items: unknown[] }).items).toEqual(['[omitted]', '[omitted]', '[omitted]', '[omitted]', { id: 1 }]);
+  });
+
+  it('applies redact.keys to an Error found inside a Map or Set, as it does to a direct one', () => {
+    const failure = Object.assign(new Error('CANARY-ERR-MESSAGE'), { code: 'CANARY-ERR-CODE' });
+    failure.name = 'CANARY-ERR-NAME';
+    failure.stack = 'CANARY-ERR-STACK';
+    const run = start({ redact: { keys: ['message', 'stack', 'type', 'code'] } });
+    run.log.info({ map: new Map([['e', failure]]), set: new Set([failure]), direct: { e: failure } }, 'x');
+    expectNoneEmitted(run, ['CANARY-ERR-MESSAGE', 'CANARY-ERR-CODE', 'CANARY-ERR-NAME', 'CANARY-ERR-STACK']);
+  });
+
+  it('classifies a boxed Map key like the string it holds', () => {
+    const run = start();
+    run.log.info({ map: new Map<unknown, unknown>([[new String('password'), 'CANARY-BOXED-KEY'], [new String('body'), 'CANARY-BOXED-BODY']]) }, 'x');
+    expectNoneEmitted(run, ['CANARY-BOXED-KEY', 'CANARY-BOXED-BODY']);
+    expect(lines(run)[0].map).toEqual([['password', '[REDACTED]'], ['body', '[omitted]']]);
+  });
+});
+
+describe('review findings: bounds', () => {
+  it('cuts a 50 MB string value, ending in the truncation marker, and does not scan all of it', () => {
+    const run = start();
+    const started = performance.now();
+    run.log.info({ big: 'x'.repeat(50 * 1024 * 1024), withSecret: `${'y'.repeat(40_000)} Bearer CANARY-BIG-TAIL` }, 'z'.repeat(1024 * 1024));
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(run.out.raw.length).toBeLessThan(80_000);
+    expectNoneEmitted(run, ['CANARY-BIG-TAIL']);
+    const [line] = lines(run);
+    expect(String(line.big).endsWith('…[truncated]')).toBe(true);
+    expect(String(line.big).length).toBeLessThanOrEqual(16 * 1024);
+    expect(String(line.msg).length).toBeLessThanOrEqual(16 * 1024);
+  });
+
+  it('does not cut a short secret in half at the cut', () => {
+    const run = start();
+    // Redaction shrinks the long query to a marker, so the characters just before the 32 KB read limit reach the output.
+    const prefix = `https://h.example/?${'a'.repeat(32_761 - 19 - 1)} `;
+    expect(prefix.length).toBe(32_761);
+    run.log.info({ v: `${prefix}sk-CANARYCUTKEY1234567890` }, 'x');
+    expectNoneEmitted(run, ['sk-C', 'CANARYCUTKEY']);
+  });
+
+  it('never traverses an omitted body: no getter on it runs', () => {
+    let reads = 0;
+    const items = Array.from({ length: 1000 }, () => ({
+      get v(): number {
+        reads++;
+        return 1;
+      },
+    }));
+    const run = start();
+    run.log.info({ body: items }, 'x');
+    expect(reads).toBe(0);
+    expect(lines(run)[0].body).toBe('[omitted]');
+  });
+
+  it('counts dropped items as visited: 300 functions then a value ends in [truncated]', () => {
+    const run = start();
+    const functions = Array.from({ length: 300 }, (_, i) => () => i);
+    run.log.info({ set: new Set<unknown>([...functions, 'CANARY-AFTER-FUNCTIONS']), list: [...functions, 'CANARY-AFTER-LIST'] }, 'x');
+    expectNoneEmitted(run, ['CANARY-AFTER-FUNCTIONS', 'CANARY-AFTER-LIST']);
+    expect(lines(run)[0]).toMatchObject({ set: ['[truncated]'], list: ['[truncated]'] });
+  });
+
+  it('truncates a primitive at depth 9 too', () => {
+    const run = start();
+    let deep: unknown = 'CANARY-DEEP-LEAF';
+    for (let i = 0; i < 9; i++) deep = { a: deep };
+    run.log.info(deep as Record<string, unknown>, 'x');
+    expectNoneEmitted(run, ['CANARY-DEEP-LEAF']);
+  });
+
+  it('bounds a sparse 50-million-item array and a million-key object without walking them', () => {
+    const run = start();
+    const sparse: unknown[] = [];
+    sparse.length = 50_000_000;
+    const wide: Record<string, number> = {};
+    for (let i = 0; i < 300_000; i++) wide[`k${i}`] = i;
+    const started = performance.now();
+    run.log.info({ sparse, wide }, 'x');
+    expect(performance.now() - started).toBeLessThan(1500);
+    const [line] = lines(run);
+    expect((line.sparse as unknown[]).length).toBeLessThanOrEqual(101);
+    expect(Object.keys(line.wide as object)).toHaveLength(201);
+  });
+});
+
+describe('review findings: reserved keys', () => {
+  it('keeps a __proto__ key from JSON.parse as data when it relocates a reserved key', () => {
+    const run = start();
+    run.log.info(JSON.parse('{"msg":"m","__proto__":{"ctx":{"injected":"CANARY-PROTO-CTX"}}}') as Record<string, unknown>, 'real');
+    const [line] = lines(run);
+    expect(line.ctx).toEqual({ msg: 'm' });
+    expect(Object.getOwnPropertyDescriptor(line, '__proto__')?.value).toEqual({ ctx: { injected: 'CANARY-PROTO-CTX' } });
+    expect(({} as Record<string, unknown>).ctx).toBeUndefined();
   });
 });
