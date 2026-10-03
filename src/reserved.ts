@@ -21,7 +21,8 @@ export function relocateReserved(fields: LogFields): LogFields {
   const moved = Object.keys(fields).filter((key) => RESERVED_KEYS.has(key));
   if (moved.length === 0) return fields;
 
-  const kept: LogFields = {};
+  // No prototype, so a `__proto__` key from JSON.parse is an own property: it can neither reparent `kept` nor be found as `ctx`.
+  const kept: LogFields = Object.create(null) as LogFields;
   for (const [key, value] of Object.entries(fields)) {
     if (!RESERVED_KEYS.has(key)) kept[key] = value;
   }

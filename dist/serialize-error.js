@@ -1,15 +1,17 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TRUNCATION_MARKER = void 0;
+exports.isWalkable = exports.isObject = exports.unreadable = exports.MAX_FIELD_DEPTH = exports.TRUNCATED = exports.CIRCULAR = exports.UNREADABLE = exports.TRUNCATION_MARKER = void 0;
+exports.read = read;
 exports.isError = isError;
+exports.boundedText = boundedText;
 exports.serializeError = serializeError;
 exports.normaliseFields = normaliseFields;
 const node_util_1 = require("node:util");
-const sanitize_1 = require("./sanitize");
+const redact_string_1 = require("./redact-string");
 exports.TRUNCATION_MARKER = '…[truncated]';
-const UNREADABLE = '[unreadable]';
-const CIRCULAR = '[circular]';
-const TRUNCATED = '[truncated]';
+exports.UNREADABLE = '[unreadable]';
+exports.CIRCULAR = '[circular]';
+exports.TRUNCATED = '[truncated]';
 const MAX_TYPE = 100;
 const MAX_CODE = 100;
 const MAX_MESSAGE = 2000;
@@ -18,9 +20,9 @@ const MAX_STACK_FRAMES = 50;
 /** Error levels kept: the error itself is depth 1, so at most four nested causes. */
 const MAX_ERROR_DEPTH = 5;
 const MAX_AGGREGATE_ERRORS = 10;
-/** How deep `normaliseFields` looks for an Error inside a caller's fields. */
-const MAX_FIELD_DEPTH = 8;
-const unreadable = Symbol('unreadable');
+/** How deep `sanitize` walks a caller's fields. */
+exports.MAX_FIELD_DEPTH = 8;
+exports.unreadable = Symbol('unreadable');
 const GENERIC_TYPE_NAMES = new Set(['', 'Object', 'Error']);
 /** Property read that survives a throwing getter or Proxy trap. */
 function read(source, key) {
@@ -28,10 +30,11 @@ function read(source, key) {
         return source[key];
     }
     catch {
-        return unreadable;
+        return exports.unreadable;
     }
 }
 const isObject = (value) => typeof value === 'object' && value !== null;
+exports.isObject = isObject;
 function isError(value) {
     try {
         return value instanceof Error || node_util_1.types.isNativeError(value);
@@ -43,13 +46,39 @@ function isError(value) {
 function truncate(text, max) {
     return text.length <= max ? text : text.slice(0, max - exports.TRUNCATION_MARKER.length) + exports.TRUNCATION_MARKER;
 }
-/** Message-like text: redacted first so a secret cut in half by the bound cannot survive as a prefix. */
-const boundedText = (text, max) => truncate((0, sanitize_1.sanitizeString)(text), max);
+/** Whitespace, a quote, an angle bracket, a backtick or a backslash: none can be inside a URL or a credential. */
+const isBreak = (code) => code <= 32 || code === 34 || code === 39 || code === 60 || code === 62 || code === 96 || code === 92;
+/** How far back a cut looks for a break. A cut never gives up more than half of `limit` either. */
+const MAX_CUT_BACKTRACK = 4096;
+/**
+ * The first `limit` characters of `text`, cut back to the last break so a word is either whole or gone. A word cut in
+ * half loses the context that identifies it: `https://u:secret@host` cut before `@host` no longer has userinfo, and
+ * `sk-abc` cut short is too short for its pattern. If there is no break nearby the partial word is dropped back to
+ * the edge of the look-back window, so nothing recognisable is ever left half cut.
+ */
+function cutAtBreak(text, limit) {
+    const floor = limit - Math.min(MAX_CUT_BACKTRACK, limit >> 1);
+    let end = limit;
+    while (end > floor && !isBreak(text.charCodeAt(end - 1)))
+        end--;
+    return text.slice(0, end);
+}
+/**
+ * Message-like text, redacted and then bounded to `max`. Redaction runs on at most `2 * max` characters, so a
+ * 50 MB string costs the same as a 2 `max` one; anything cut ends in the truncation marker.
+ */
+function boundedText(text, max) {
+    if (text.length <= max * 2)
+        return truncate((0, redact_string_1.sanitizeString)(text), max);
+    const redacted = (0, redact_string_1.sanitizeString)(cutAtBreak(text, max * 2));
+    return redacted.slice(0, max - exports.TRUNCATION_MARKER.length) + exports.TRUNCATION_MARKER;
+}
 function boundStack(stack) {
     const kept = [];
     let frames = 0;
-    let cutFrames = false;
-    for (const line of (0, sanitize_1.sanitizeString)(stack).split('\n')) {
+    let cutFrames = stack.length > MAX_STACK * 2;
+    const input = cutFrames ? cutAtBreak(stack, MAX_STACK * 2) : stack;
+    for (const line of (0, redact_string_1.sanitizeString)(input).split('\n')) {
         if (/^\s+at /.test(line) && ++frames > MAX_STACK_FRAMES) {
             cutFrames = true;
             break;
@@ -65,27 +94,27 @@ function typeName(source) {
     const ctor = read(source, 'constructor');
     const ctorName = typeof ctor === 'function' ? read(ctor, 'name') : undefined;
     for (const candidate of [ctorName, read(source, 'name'), read(source, 'type')]) {
-        if (candidate === unreadable)
-            return UNREADABLE;
+        if (candidate === exports.unreadable)
+            return exports.UNREADABLE;
         // A bare Error or plain object says nothing, so a more specific `name` (an AbortError) wins over it.
         if (typeof candidate === 'string' && !GENERIC_TYPE_NAMES.has(candidate))
-            return truncate(candidate, MAX_TYPE);
+            return boundedText(candidate, MAX_TYPE);
     }
     return 'Error';
 }
 /** A real Error, or an object carrying a string `message`: axios's `toJSON()` output, an error that went through JSON. */
 function isErrorLike(value) {
-    return isError(value) || (isObject(value) && typeof read(value, 'message') === 'string');
+    return isError(value) || ((0, exports.isObject)(value) && typeof read(value, 'message') === 'string');
 }
 function describeNonError(value) {
-    if (!isObject(value) && typeof value !== 'function')
+    if (!(0, exports.isObject)(value) && typeof value !== 'function')
         return String(value);
     // Never String(value): that would run a caller's toString (or print a function's source).
     try {
         return Object.prototype.toString.call(value);
     }
     catch {
-        return UNREADABLE;
+        return exports.UNREADABLE;
     }
 }
 function fromNonError(value) {
@@ -93,8 +122,8 @@ function fromNonError(value) {
 }
 function readText(source, key, bound) {
     const value = read(source, key);
-    if (value === unreadable)
-        return UNREADABLE;
+    if (value === exports.unreadable)
+        return exports.UNREADABLE;
     return typeof value === 'string' ? bound(value) : undefined;
 }
 function readStatus(source) {
@@ -107,25 +136,25 @@ function readStatus(source) {
 }
 function readCode(source) {
     const value = read(source, 'code');
-    if (value === unreadable)
-        return UNREADABLE;
+    if (value === exports.unreadable)
+        return exports.UNREADABLE;
     if (typeof value === 'string')
-        return truncate(value, MAX_CODE);
+        return boundedText(value, MAX_CODE);
     return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 function node(value, depth, path) {
-    if (value === unreadable)
-        return UNREADABLE;
-    if (isObject(value) && path.has(value))
-        return CIRCULAR;
+    if (value === exports.unreadable)
+        return exports.UNREADABLE;
+    if ((0, exports.isObject)(value) && path.has(value))
+        return exports.CIRCULAR;
     if (depth > MAX_ERROR_DEPTH)
-        return TRUNCATED;
+        return exports.TRUNCATED;
     return fromValue(value, depth, path);
 }
 function readErrors(source, depth, path) {
     const list = read(source, 'errors');
-    if (list === unreadable)
-        return { errors: [UNREADABLE] };
+    if (list === exports.unreadable)
+        return { errors: [exports.UNREADABLE] };
     if (!Array.isArray(list))
         return {};
     const length = read(list, 'length');
@@ -170,6 +199,7 @@ function fromValue(value, depth, path) {
 function serializeError(value) {
     return fromValue(value, 1, new Set());
 }
+/** An array, or an object with no prototype beyond `Object`: data, as opposed to a class instance. */
 const isWalkable = (value) => {
     if (Array.isArray(value))
         return true;
@@ -181,52 +211,19 @@ const isWalkable = (value) => {
         return false;
     }
 };
-function walk(value, depth, path) {
-    if (isError(value))
-        return serializeError(value);
-    if (!isObject(value) || !isWalkable(value))
-        return value;
-    if (path.has(value))
-        return CIRCULAR;
-    if (depth > MAX_FIELD_DEPTH)
-        return TRUNCATED;
-    path.add(value);
-    try {
-        if (Array.isArray(value)) {
-            const length = read(value, 'length');
-            const items = [];
-            for (let i = 0; typeof length === 'number' && i < length; i++)
-                items.push(readField(value, i, depth, path));
-            return items;
-        }
-        return Object.fromEntries(Object.keys(value).map((key) => [key, readField(value, key, depth, path)]));
-    }
-    catch {
-        return UNREADABLE;
-    }
-    finally {
-        path.delete(value);
-    }
-}
-function readField(source, key, depth, path) {
-    const value = read(source, key);
-    return value === unreadable ? UNREADABLE : walk(value, depth + 1, path);
-}
+exports.isWalkable = isWalkable;
 /**
- * Makes every Error inside caller fields safe before pino sees it: pino's
- * stringifier would otherwise emit an Error's enumerable properties (an axios
- * error's `config.headers.Authorization`). The `err` key always goes through
- * `serializeError`, whatever it holds; an Error anywhere else, however deeply
- * nested in plain objects and arrays, is replaced by the same allowlisted form.
+ * Prepares caller fields for `sanitize`: the `err` key always goes through `serializeError`, whatever it holds, so
+ * what is logged under it is the allowlisted form; undefined values are dropped. Everything else is left to
+ * `sanitize`, which serialises an Error found anywhere inside the fields the same way and owns every bound.
  */
 function normaliseFields(fields) {
-    const path = new Set([fields]);
     const entries = [];
     for (const key of Object.keys(fields)) {
         const value = read(fields, key);
         if (value === undefined)
             continue;
-        entries.push([key, value === unreadable ? UNREADABLE : key === 'err' ? serializeError(value) : walk(value, 1, path)]);
+        entries.push([key, value === exports.unreadable ? exports.UNREADABLE : key === 'err' ? serializeError(value) : value]);
     }
     // fromEntries defines own properties, so a hostile `__proto__` key stays data instead of reassigning the prototype.
     return Object.fromEntries(entries);
