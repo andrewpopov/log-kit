@@ -123,6 +123,18 @@ log.info({ app: 'other', user: 'u1' }, 'hello');
 
 If you pass your own `ctx` object, relocated keys join it without replacing an entry of yours (a clash gets a trailing `_`). A `ctx` that is not an object is kept as `ctx.value`.
 
+## Heartbeat
+
+`startHeartbeat(logger, { intervalMs? })` emits `log heartbeat` once immediately and then every `intervalMs` (default 300000, a finite integer of at least 1000; anything else throws `LogConfigError` with code `INVALID_HEARTBEAT_INTERVAL`). Each line carries `heartbeat_interval_s`. It returns `{ stop() }`; `stop()` is idempotent. The timer is unref'd, so it never keeps a process alive, and a throwing logger is swallowed rather than crashing the process.
+
+It exists so monitoring can tell a quiet source from a dead one: the zirkbot `logship-heartbeat-missing` alert fires when a source that heartbeated in the last 24h stops for 15m, keyed on `_msg:="log heartbeat"`. That msg is a contract. Do not change it.
+
+```ts
+const heartbeat = startHeartbeat(log);
+// on shutdown
+heartbeat.stop();
+```
+
 ## Verify
 
 `npm install && npm run verify`.
