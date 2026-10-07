@@ -25,6 +25,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./express": {
+      "types": "./dist/express.d.ts",
+      "default": "./dist/express.js"
+    },
     "./schema/log-line.json": "./schema/log-line.json",
     "./package.json": "./package.json"
   },
@@ -56,12 +60,22 @@
   "devDependencies": {
     "@andrewpopov/deploy-kit": "github:andrewpopov/deploy-kit#v0.25.0",
     "@andrewpopov/release-kit": "github:andrewpopov/release-kit#v0.3.1",
+    "@types/express": "^5.0.6",
     "@types/node": "^20.14.0",
     "ajv": "^8.20.0",
+    "express": "^5.2.1",
     "typescript": "^5.5.0",
     "vitest": "^4.1.10"
   },
   "dependencies": {
     "pino": "10.4.0"
+  },
+  "peerDependencies": {
+    "express": ">=4"
+  },
+  "peerDependenciesMeta": {
+    "express": {
+      "optional": true
+    }
   }
 }
