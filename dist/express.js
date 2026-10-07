@@ -43,18 +43,39 @@ function expressTemplate(req) {
     return joined === '' ? '/' : joined;
 }
 /**
- * Never the raw URL. A router mounted under a parameterised path reports its concrete `baseUrl` (`/users/42`), so a
- * declared template that matches the full path wins over the Express-joined one whenever there is a mount.
+ * Never the raw URL. Express does not expose a mount's template: under a mount (`req.baseUrl` non-empty) it reports the
+ * concrete `baseUrl` (`/orgs/acme-77`), so a mounted route is a matching declared template or `__unmatched__`, never
+ * Express's own joined path. Root-level routes use Express's template.
  */
 function routeOf(req, declared) {
     const viaDeclared = () => {
         const path = pathnameOf(req.originalUrl);
         return declared.find((template) => matchesTemplate(template, path));
     };
-    const matched = expressTemplate(req);
-    if (matched === undefined)
+    if (req.baseUrl !== '')
         return viaDeclared() ?? exports.UNMATCHED_ROUTE;
-    return (req.baseUrl === '' ? undefined : viaDeclared()) ?? matched;
+    return expressTemplate(req) ?? viaDeclared() ?? exports.UNMATCHED_ROUTE;
+}
+const SENSITIVE_HEADERS = new Set([
+    'authorization',
+    'proxy-authorization',
+    'cookie',
+    'set-cookie',
+    'user-agent',
+    'forwarded',
+    'x-forwarded-for',
+    'x-real-ip',
+]);
+const SENSITIVE_HEADER_PARTS = ['auth', 'token', 'key', 'secret', 'session', 'password', 'cookie'];
+function requireReqIdHeader(value) {
+    if (typeof value !== 'string' || value.trim() === '') {
+        throw new errors_1.LogConfigError('INVALID_ARGUMENT', 'reqIdHeader must be a non-empty string');
+    }
+    const header = value.toLowerCase();
+    if (SENSITIVE_HEADERS.has(header) || SENSITIVE_HEADER_PARTS.some((part) => header.includes(part))) {
+        throw new errors_1.LogConfigError('INVALID_ARGUMENT', 'reqIdHeader must not name a header that can carry a credential or client identity');
+    }
+    return header;
 }
 function resolveReqId(req, header) {
     const incoming = req.headers[header];
@@ -76,7 +97,7 @@ function httpLogger(options) {
     const { logger } = options;
     const declared = requireTemplates('routes', options.routes);
     const ignore = requireTemplates('ignore', options.ignore);
-    const header = (options.reqIdHeader ?? DEFAULT_REQ_ID_HEADER).toLowerCase();
+    const header = requireReqIdHeader(options.reqIdHeader ?? DEFAULT_REQ_ID_HEADER);
     return (req, res, next) => {
         const startedAt = process.hrtime.bigint();
         const reqId = resolveReqId(req, header);
