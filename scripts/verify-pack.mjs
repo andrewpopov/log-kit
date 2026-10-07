@@ -2,7 +2,8 @@
 /**
  * Pack the package, install the tarball into a throwaway consumer and assert:
  *   1. the declared entry points and the JSON schema ship in the tarball;
- *   2. CommonJS require() and native ESM import both resolve the root entry;
+ *   2. CommonJS require() and native ESM import both resolve the root entry and the ./express subpath, and loading
+ *      the root pulls in no express (the consumer has none installed);
  *   3. the schema is reachable through its package export;
  *   4. a logger created from the installed tarball emits a schema-v1 line.
  * Exits non-zero with a clear message on any failure.
@@ -22,7 +23,7 @@ function fail(message) {
   process.exit(1);
 }
 
-const REQUIRED_FILES = ['dist/index.js', 'dist/index.d.ts', 'schema/log-line.json'];
+const REQUIRED_FILES = ['dist/index.js', 'dist/index.d.ts', 'dist/express.js', 'dist/express.d.ts', 'schema/log-line.json'];
 
 const workDir = mkdtempSync(join(tmpdir(), 'log-kit-verify-'));
 try {
@@ -67,6 +68,24 @@ try {
   `;
   run('node', ['--input-type=module', '-e', esm], { cwd: consumerDir });
   console.log('[verify:pack] OK: native ESM import resolves root and schema');
+
+  // The consumer has no express installed: the root loading at all proves the core never needs it, and the cache check
+  // proves nothing reached for it. The ./express subpath loads its runtime without express too (types only).
+  const cjsExpress = `
+    const root = require('${pkg.name}');
+    if (Object.keys(require.cache).some((file) => /[\\\\/]node_modules[\\\\/]express[\\\\/]/.test(file))) throw new Error('core pulled in express');
+    const sub = require('${pkg.name}/express');
+    if (typeof sub.httpLogger !== 'function') throw new Error('cjs ./express export missing');
+  `;
+  run('node', ['-e', cjsExpress], { cwd: consumerDir });
+  console.log('[verify:pack] OK: CommonJS require() resolves ./express; core loads without express');
+
+  const esmExpress = `
+    import { httpLogger } from '${pkg.name}/express';
+    if (typeof httpLogger !== 'function') throw new Error('esm ./express export missing');
+  `;
+  run('node', ['--input-type=module', '-e', esmExpress], { cwd: consumerDir });
+  console.log('[verify:pack] OK: native ESM import resolves ./express');
 
   const emit = `require('${pkg.name}').createLogger({ app: 'pack-smoke' }).info('hello')`;
   const line = JSON.parse(run('node', ['-e', emit], { cwd: consumerDir }).trim());

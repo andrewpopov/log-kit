@@ -2,7 +2,7 @@
 
 One fleet logger for Node services: a single JSON line schema, redaction on by default, HTTP request logging, stdout only. See PKG-203.
 
-This README covers the core logger, error normalisation and redaction. The HTTP adapters land in a later slice.
+This README covers the core logger, error normalisation, redaction and the Express request logger. The Fastify adapter lands in a later slice.
 
 ## Usage
 
@@ -122,6 +122,53 @@ log.info({ app: 'other', user: 'u1' }, 'hello');
 ```
 
 If you pass your own `ctx` object, relocated keys join it without replacing an entry of yours (a clash gets a trailing `_`). A `ctx` that is not an object is kept as `ctx.value`.
+
+## HTTP (Express)
+
+```ts
+import express from 'express';
+import { createLogger } from '@andrewpopov/log-kit';
+import { httpLogger } from '@andrewpopov/log-kit/express';
+
+const log = createLogger({ app: 'savoro', proc: 'web' });
+const app = express();
+app.use(httpLogger({ logger: log, ignore: ['/health'], routes: ['/static/:file'] }));
+app.get('/users/:id', (req, res) => {
+  req.log.info('loading user'); // carries the same req_id
+  res.send(res.locals.reqId);
+});
+```
+
+`express` is an optional peer dependency (`>=4`); the core entry never loads it. Mount `httpLogger` first, so it sees every request.
+
+`httpLogger({ logger, routes?, ignore?, reqIdHeader? })` returns middleware. Bad options throw `LogConfigError` (`INVALID_ARGUMENT`). It logs **one line per request**, from whichever of `finish` or `close` fires first (a guard makes a second emission impossible):
+
+```json
+{"level":"info","time":"2026-10-07T13:22:16.512Z","v":1,"app":"demo","req_id":"abc-123","http":{"method":"GET","route":"/users/:id","status":200,"duration_ms":1.482,"outcome":"completed"},"msg":"request completed"}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `msg` | `request completed` or `request aborted`. A contract: alerts key on it. |
+| `req_id` | See below. Also `res.locals.reqId` and `req.log`. |
+| `http.method` | The request method; anything that is not 1 to 16 letters is `OTHER`. |
+| `http.route` | The route template, never the URL. See below. |
+| `http.status` | The response status. Omitted on an aborted request that never wrote a head. |
+| `http.duration_ms` | From a monotonic clock, rounded to a microsecond. |
+| `http.outcome` | `completed`, or `aborted` when the response closed before it finished (client went away). |
+| `err` | Only when the app sets `res.locals.err`, through the normal error serialiser. |
+
+**Level** follows the status: 5xx is `error`, 4xx is `warn`, everything else is `info`. An aborted request is `warn`.
+
+**`http.route`** is the route template, never the URL. For a root-level route it is Express's matched template (`req.route.path`, when the path is a string). Express does not expose the template of a mount, so a route under a mounted router (`app.use('/orgs/:org', router)`) is the first `routes` template that matches the path segment by segment (`:name` matches any one segment), and otherwise `__unmatched__`. Declare templates for routes under a mounted router in `routes`, or they log as `__unmatched__`. A root-level request with no matched route also falls back to `routes`, then `__unmatched__`. The raw `req.url` and `originalUrl` are never used.
+
+**`req_id`** is the `x-request-id` header (or `reqIdHeader`) when it matches `^[A-Za-z0-9._-]{1,64}$` and is not changed by redaction; otherwise a fresh `crypto.randomUUID()`. Invalid, over-long, injection-looking and token-looking values are replaced, never logged. `reqIdHeader` must be a non-empty string and is refused (`INVALID_ARGUMENT`) at construction when it names a credential or client-identity header: `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `user-agent`, `forwarded`, `x-forwarded-for`, `x-real-ip`, or any name containing `auth`, `token`, `key`, `secret`, `session`, `password` or `cookie`.
+
+**`ignore`** takes exact paths or whole-segment prefixes: `/health` skips `/health` and `/health/live`, never `/healthz` or `/health-check-admin`. It is matched against the route template or the path without its query string, and only for a completed request with status below 400. A failing health check (4xx, 5xx) is always logged. An aborted request is always logged.
+
+**Errors.** A thrown error is not logged here: the app's own error handler is where it is logged once, with its context. To attach it to the request line instead, set `res.locals.err = err` there; it is emitted as `err` through the same bounded serialiser. An error passed to `next(err)` is never read by the middleware, which cannot see it.
+
+**Deliberately never logged:** query strings, the raw URL or path, request and response headers (so no `Authorization`, `Cookie` or API key), bodies, the client IP and the user agent. Everything the line does carry goes through the same sanitiser as any logger call.
 
 ## Heartbeat
 
