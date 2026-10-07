@@ -125,7 +125,7 @@ describe('httpLogger', () => {
         app.use('/pages', router);
         app.use('/static', (_req, res) => void res.send('s'));
       },
-      { routes: ['/static/:file'] },
+      { routes: ['/static/:file', '/pages/:slug'] },
     );
     await get(port, '/users/12345');
     await get(port, '/pages/about');
@@ -149,6 +149,32 @@ describe('httpLogger', () => {
     await settle();
     expect(httpOf(out.lines[0]).route).toBe('/orgs/:org/items');
     expect(out.raw).not.toContain('acme-77');
+  });
+
+  it.each([
+    ['no declaration', undefined, ['__unmatched__']],
+    ['a non-matching declaration', ['/orgs/:org/other'], ['__unmatched__']],
+  ])('logs a parameterised mount with %s as __unmatched__, never the concrete value', async (_name, routes, expected) => {
+    const { out, port } = await start(
+      (app) => {
+        const router = express.Router({ mergeParams: true });
+        router.get('/items', (_req, res) => void res.send('i'));
+        app.use('/orgs/:org', router);
+      },
+      routes === undefined ? {} : { routes },
+    );
+    await get(port, '/orgs/acme-77/items');
+    await settle();
+    expect(out.lines.map((l) => httpOf(l).route)).toEqual(expected);
+    expect(out.raw).not.toContain('acme-77');
+  });
+
+  it('keeps Express template for a root-level parameterised route', async () => {
+    const { out, port } = await start((app) => app.get('/users/:id', (_req, res) => void res.send('u')));
+    await get(port, '/users/777');
+    await settle();
+    expect(httpOf(out.lines[0]).route).toBe('/users/:id');
+    expect(out.raw).not.toContain('777');
   });
 
   it('never logs query strings', async () => {
@@ -189,6 +215,25 @@ describe('httpLogger', () => {
       await settle();
       expect(out.lines).toHaveLength(1);
       expect(out.lines[0]).toMatchObject({ level: 'error', http: { status: 500, route: '/health' } });
+    });
+
+    it('logs a client abort on an ignored health path once as aborted', async () => {
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((done) => (release = done));
+      const { out, port } = await start((app) => app.get('/health', (_req, res) => void held.then(() => res.send('ok'))), {
+        ignore: ['/health'],
+      });
+      await new Promise<void>((done) => {
+        const req = httpRequest({ host: '127.0.0.1', port, path: '/health', agent: false });
+        req.on('error', () => undefined);
+        req.on('socket', (socket) => socket.on('connect', () => setTimeout(() => (req.destroy(), done()), 30)));
+        req.end();
+      });
+      await settle();
+      release();
+      await settle();
+      expect(out.lines).toHaveLength(1);
+      expect(out.lines[0]).toMatchObject({ msg: 'request aborted', http: { route: '/health', outcome: 'aborted' } });
     });
 
     it('also logs a health path answering 4xx', async () => {
@@ -242,6 +287,23 @@ describe('httpLogger', () => {
       await settle();
       expect(out.lines[0]?.req_id).toBe('corr-1');
       expect(out.lines[1]?.req_id).toMatch(/^[0-9a-f-]{36}$/);
+    });
+  });
+
+  describe('reqIdHeader validation', () => {
+    const logger = createLoggerWithStream({ app: 'demo' }, captureStream());
+    it.each([
+      'authorization', 'Proxy-Authorization', 'cookie', 'Set-Cookie', 'user-agent', 'forwarded', 'X-Forwarded-For', 'x-real-ip',
+      'x-api-key', 'x-auth-id', 'x-access-token', 'x-client-secret', 'x-session-id', 'x-password-hint', 'x-cookie-id',
+    ])('refuses sensitive header %s', (name) => {
+      expect(() => httpLogger({ logger, reqIdHeader: name })).toThrowError(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+    });
+    it.each(['', '   ', 42 as unknown as string])('refuses empty or non-string header %j', (name) => {
+      expect(() => httpLogger({ logger, reqIdHeader: name })).toThrowError(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+    });
+    it('accepts the default and x-correlation-id', () => {
+      expect(() => httpLogger({ logger })).not.toThrow();
+      expect(() => httpLogger({ logger, reqIdHeader: 'x-correlation-id' })).not.toThrow();
     });
   });
 
