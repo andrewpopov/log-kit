@@ -6,7 +6,7 @@ export const REDACTED = '[REDACTED]';
  *   `(?<![\w-])` boundary, so a failed attempt never restarts inside the run it just scanned;
  * - no quantified group is nested inside another quantifier, and a name tail is bounded;
  * - whitespace between a name and its value is `[ \t]`, never `\s`, so it cannot jump to the next line.
- * The 1 MB adversarial test in `redact-string.test.ts` is what holds these to it.
+ * The adversarial growth test in `redact-string.test.ts` (8x the input must cost under 24x the time) holds these to it.
  */
 
 /** Characters that end a URL embedded in prose or JSON: whitespace, quotes, angle brackets, backtick, backslash. */
