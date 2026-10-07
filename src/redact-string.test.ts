@@ -107,7 +107,42 @@ describe('sanitizeString is idempotent', () => {
 });
 
 describe('sanitizeString runs in linear time', () => {
-  const SIZE = 1_000_000;
+  /**
+   * The guard compares the time for n and 8n characters, measured in the same process, so it holds on a runner several
+   * times slower than a laptop. Linear input costs about 8x; a quadratic pattern costs about 64x.
+   */
+  const SIZES = [2_048, 16_384, 131_072, 1_048_576];
+  const MAX_GROWTH = 24;
+  /** Below this a time is mostly fixed overhead, so the pair moves up to a larger n. */
+  const MEASURABLE_MS = 2;
+
+  /** Best of three, so one GC pause or scheduler hiccup does not count. */
+  const fastestRun = (text: string): number => {
+    let fastest = Infinity;
+    for (let run = 0; run < 3; run++) {
+      const started = performance.now();
+      sanitizeString(text);
+      fastest = Math.min(fastest, performance.now() - started);
+    }
+    return fastest;
+  };
+
+  /**
+   * How much slower 8n is than n, for the first n slow enough to measure (or the largest pair). A quadratic pattern is
+   * measurable at a small n and fails there in seconds, never reaching 1 MB, where it would hang the run.
+   */
+  const growth = (unit: string): number => {
+    const timeAt = (size: number) => fastestRun(unit.repeat(Math.ceil(size / unit.length)).slice(0, size));
+    timeAt(SIZES[0]); // warm-up: compile every pattern before anything is timed
+    let previous = timeAt(SIZES[0]);
+    for (const size of SIZES.slice(1)) {
+      const current = timeAt(size);
+      if (previous >= MEASURABLE_MS || size === SIZES[SIZES.length - 1]) return current / previous;
+      previous = current;
+    }
+    throw new Error('unreachable: SIZES has more than one entry');
+  };
+
   const shapes: readonly string[] = [
     'a',
     'eyJ',
@@ -168,10 +203,7 @@ describe('sanitizeString runs in linear time', () => {
     'Basic abcdefgh',
   ];
 
-  it.each(shapes)('1 MB of %j sanitises in under 100 ms', (unit) => {
-    const text = unit.repeat(Math.ceil(SIZE / unit.length)).slice(0, SIZE);
-    const started = performance.now();
-    sanitizeString(text);
-    expect(performance.now() - started).toBeLessThan(100);
+  it.each(shapes)('%j repeated: 8x the input costs under 24x the time', (unit) => {
+    expect(growth(unit)).toBeLessThan(MAX_GROWTH);
   });
 });
