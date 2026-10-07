@@ -129,7 +129,8 @@ describe('sanitizeString runs in linear time', () => {
 
   /**
    * How much slower 8n is than n, for the first n slow enough to measure (or the largest pair). A quadratic pattern is
-   * measurable at a small n and fails there in seconds, never reaching 1 MB, where it would hang the run.
+   * measurable at a small n and fails there (about 20 s on skybox when the JWT anchor was removed), never reaching
+   * 1 MB, where it would run for hours.
    */
   const growth = (unit: string): number => {
     const timeAt = (size: number) => fastestRun(unit.repeat(Math.ceil(size / unit.length)).slice(0, size));
