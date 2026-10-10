@@ -1,6 +1,6 @@
 {
   "name": "@andrewpopov/log-kit",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Fleet structured logging for Node services: one JSON line schema (v1), word levels, reserved envelope keys, synchronous stdout.",
   "author": "Andrew Popov",
   "license": "MIT",
