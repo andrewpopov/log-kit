@@ -28,7 +28,7 @@ const REQUIRED_FILES = ['dist/index.js', 'dist/index.d.ts', 'dist/express.js', '
 const workDir = mkdtempSync(join(tmpdir(), 'log-kit-verify-'));
 try {
   console.log('[verify:pack] Building...');
-  run('npm', ['run', 'build'], { cwd: pkgRoot, stdio: 'inherit' });
+  run('npm', ['run', 'compile'], { cwd: pkgRoot, stdio: 'inherit' });
 
   console.log('[verify:pack] Packing tarball...');
   const [{ filename }] = JSON.parse(
