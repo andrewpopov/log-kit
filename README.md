@@ -184,4 +184,4 @@ heartbeat.stop();
 
 ## Verify
 
-`npm install && npm run verify`.
+`npm install && npm run verify`. Run `npm run hooks` once after cloning to enable the pre-push gate.
