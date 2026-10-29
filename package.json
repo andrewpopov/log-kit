@@ -1,6 +1,6 @@
 {
   "name": "@andrewpopov/log-kit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Fleet structured logging for Node services: one JSON line schema (v1), word levels, reserved envelope keys, synchronous stdout.",
   "author": "Andrew Popov",
   "license": "MIT",
@@ -59,7 +59,7 @@
   },
   "devDependencies": {
     "@andrewpopov/deploy-kit": "github:andrewpopov/deploy-kit#v0.25.0",
-    "@andrewpopov/release-kit": "github:andrewpopov/release-kit#v0.7.0",
+    "@andrewpopov/release-kit": "github:andrewpopov/release-kit#v0.7.1",
     "@types/express": "^5.0.6",
     "@types/node": "^20.14.0",
     "ajv": "^8.20.0",
